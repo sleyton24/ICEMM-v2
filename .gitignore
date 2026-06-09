@@ -1,0 +1,16 @@
+# Lock/temporales del entorno
+.849*
+*.tmp
+*~
+
+# Sistema operativo
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Dependencias futuras (cuando se migre a Vite)
+node_modules/
+dist/
+
+# Config local de Claude (no productivo)
+.claude/settings.local.json
