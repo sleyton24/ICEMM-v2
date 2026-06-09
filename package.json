@@ -1,0 +1,15 @@
+{
+  "name": "icemm-control-presupuestario",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Control presupuestario ICEMM/EMM — biblioteca de cálculo pura y tests de regresión (números de control). Etapa 1 de la migración del monolito fase1_proyectos.html a build Vite.",
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}
