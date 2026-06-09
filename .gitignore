@@ -14,3 +14,9 @@ dist/
 
 # Config local de Claude (no productivo)
 .claude/settings.local.json
+
+# Módulo Control de Costos (app separada: Python + backend Node/Prisma + frontend Vite).
+# IGNORADO POR SEGURIDAD: contiene credenciales SQL en texto plano (informe_lq.py,
+# exportar_*.py), un .git anidado y una copia duplicada icemm~/. No commitear hasta
+# decidir cómo versionarlo (rotar clave, mover a .env, quitar .git anidado + icemm~/).
+ICEMM/
