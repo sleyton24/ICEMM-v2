@@ -26,6 +26,7 @@ migre a Vite, el monolito importará desde acá y se elimina la duplicación.
 | `resultado.js` | `ingresosTotales`, `resultadoOperacional`, `ebitda`, agregación `ytd`/`ytg`/`fy` |
 | `formato.js` | `fUF`, `fN`, parseo de número chileno |
 | `migracion.js` | `reclasificarActuals`, `migrarProjectBudget` — espeja la migración v2 del monolito |
+| `validacionCarga.js` | `knownUNs`, `detectarUNsDesconocidas`, `detectarSinClasificar`, `mesesYaCargados` — validación de carga del Reporte Manager |
 
 ## Frente 3 — modelo de 8 categorías (RESUELTO 2026-06-09)
 
@@ -47,4 +48,12 @@ npm test           # watch mode
 npm run test:run   # una corrida (CI)
 ```
 
-Estado al 2026-06-09: **214 tests, 8 módulos, todo en verde** (rama `frente3-8-categorias`).
+## Validación de carga (Frente 3 — activada 2026-06-09)
+
+El parser del Reporte Manager (`processManagerRows`) ahora **sí puebla `warnSet`** (antes
+quedaba vacío y nada se advertía): avisa de **UNs desconocidas** (no proyecto ni OC '01' →
+sus costos no se imputan a ningún proyecto) y de **códigos sin clasificación** (quedan fuera
+del costo de obra). `confirmManagerLoad` además **avisa antes de sobrescribir** un mes ya
+cargado. Lógica espejada y testeada en `validacionCarga.js`.
+
+Estado al 2026-06-09: **224 tests, 9 módulos, todo en verde** (rama `frente3-8-categorias`).

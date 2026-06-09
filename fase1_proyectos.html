@@ -2564,6 +2564,29 @@ function DataLoader({ projects, activeYear }) {
       delete bm.aggMap;
     });
 
+    // Validación de carga (antes warnSet quedaba vacío y nada se advertía):
+    //  - UN desconocida: no es un proyecto registrado ni Oficina Central ('01').
+    //    Sus costos NO se imputan a ningún proyecto aguas abajo (pérdida silenciosa).
+    //  - código sin clasificación: queda en "Sin Clasificar", fuera del costo de obra.
+    const knownUNs = new Set([...projects.map(p => p.unCode), '01']);
+    const unknownUN = {}, sinClasif = {};
+    Object.values(byMonth).forEach(bm => {
+      bm.rows.forEach(r => {
+        if (!knownUNs.has(r.unCode)) {
+          if (!unknownUN[r.unCode]) unknownUN[r.unCode] = { unDesc: r.unDesc, uf: 0 };
+          unknownUN[r.unCode].uf += r.total;
+        }
+        if (r.clasificacion === 'no_clasificado' && r.concepto && +r.concepto !== 0) {
+          if (!sinClasif[r.concepto]) sinClasif[r.concepto] = { uf: 0, count: 0 };
+          sinClasif[r.concepto].uf += r.total; sinClasif[r.concepto].count++;
+        }
+      });
+    });
+    Object.entries(unknownUN).forEach(([un, v]) =>
+      warnSet.add(`UN ${un}${v.unDesc ? ' (' + v.unDesc + ')' : ''} no existe en proyectos registrados: ${v.uf.toFixed(2)} UF NO se imputarán a ningún proyecto.`));
+    Object.entries(sinClasif).forEach(([c, v]) =>
+      warnSet.add(`Código ${c} sin clasificación (${v.count} mov., ${v.uf.toFixed(2)} UF): queda en "Sin Clasificar", fuera del costo de obra.`));
+
     return { byMonth, warnings: [...warnSet], totalRows, skippedCV, detected, sampleVals };
   }
 
@@ -2579,6 +2602,11 @@ function DataLoader({ projects, activeYear }) {
 
   function confirmManagerLoad() {
     if (!managerStage?.byMonth) return;
+    // Aviso de meses ya cargados (antes se sobrescribían en silencio, contra la spec)
+    const yaCargados = Object.values(managerStage.byMonth)
+      .filter(({ year, month }) => !!storage.get(`budget-control:actuals:${year}:${String(month).padStart(2,'0')}`))
+      .map(({ year, month }) => `${String(month).padStart(2,'0')}/${year}`);
+    if (yaCargados.length && !confirm(`Estos meses YA tienen datos cargados y serán SOBRESCRITOS:\n  ${yaCargados.join(', ')}\n\n¿Continuar y reemplazarlos?`)) return;
     const now = new Date();
     const entries = [];
     Object.entries(managerStage.byMonth).forEach(([, { year, month, rows, rowCount }]) => {
