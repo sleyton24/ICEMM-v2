@@ -20,18 +20,24 @@ migre a Vite, el monolito importará desde acá y se elimina la duplicación.
 | Módulo | Contenido |
 |---|---|
 | `curvas.js` | `monthsBetween`, `generateSCurve`, `normalizeCurve`, `reescalarCurva`, `applyShift`, `projectMonthIdx` |
-| `clasificacion.js` | `classifyManagerCode` + constantes `COST_CATS`, `PROJ_CATS`, `DEFAULT_COST_PCTS`, `OC_CATS`, `OC_PLAN`, `emptyBudget` |
-| `ingresos.js` | `calcMonthlyRevenue` (Suma Alzada / Admin Delegada), `snapshotProjects` |
+| `clasificacion.js` | `classifyManagerCode` + constantes `COST_CATS` (8), `PROJ_CATS`, `DEFAULT_COST_PCTS`, `OC_CATS`, `OC_PLAN`, `emptyBudget` — **fuente única del catálogo** |
+| `ingresos.js` | `calcMonthlyRevenue` (Suma Alzada / Admin Delegada), `snapshotProjects` (importa `COST_CATS` de `clasificacion.js`) |
 | `flujocaja.js` | fórmulas puras de caja: `ivaDebito`, `ivaCredito`, `ivaCredAcum`, `saldoContador`, `ivaNetoMes`, `ppm`, `fcMes`, `cajaFinal` |
 | `resultado.js` | `ingresosTotales`, `resultadoOperacional`, `ebitda`, agregación `ytd`/`ytg`/`fy` |
 | `formato.js` | `fUF`, `fN`, parseo de número chileno |
+| `migracion.js` | `reclasificarActuals`, `migrarProjectBudget` — espeja la migración v2 del monolito |
 
-## Divergencias spec pinneadas (a resolver en Frente 3)
+## Frente 3 — modelo de 8 categorías (RESUELTO 2026-06-09)
 
-- **6 vs 8 categorías**: `COST_CATS.length === 6`; faltan `edificaciones_comerciales` y `post_venta`.
-- **`classifyManagerCode`**: `600-649 → 'otros'` (spec: Edificaciones); `550-599` y `650-899 → 'no_clasificado'` (spec: 700-749 Post Venta, 800-899 Otros).
-- **`calcMonthlyRevenue` (Suma Alzada)**: NO aplica devolución de anticipo (`advancePercent` solo informativo); ingreso neto actual = bruto × (1 − retención/100).
-- **`normalizeCurve`**: el comentario dice "2 decimales" pero redondea a 4.
+- ✅ **8 categorías**: `COST_CATS` ahora tiene las 8 de la spec (+`edificaciones_comerciales`, +`post_venta`); `otros` queda último (catch-all del prorrateo).
+- ✅ **`classifyManagerCode`** alineado con spec: `600-649→edificaciones_comerciales`, `700-749→post_venta`, `800-899→otros`, `900+→oficina_central`.
+- ✅ **Migración de datos** (`migrateSchema` en el monolito, `migracion.js` acá): reclasifica los actuals guardados re-ejecutando classify sobre el `concepto`; idempotente; no toca filas sin código. Verificado contra datos reales: **no cambia el costo total elegible al EBITDA**, solo redistribuye familias.
+
+### Divergencias remanentes (vigilar / próximos frentes)
+
+- **Huecos reales** sin código de spec: `550-599`, `650-699`, `750-799` → `no_clasificado`. En los datos reales de ICEMM no aparecen; confirmar con contabilidad si alguna vez se emiten.
+- **`calcMonthlyRevenue` (Suma Alzada)**: aún NO aplica devolución de anticipo (`advancePercent` informativo); ingreso neto = bruto × (1 − retención/100). Pendiente decidir si se alinea a la spec.
+- **`normalizeCurve`**: el comentario dice "2 decimales" pero redondea a 4 (cosmético).
 
 ## Correr
 
@@ -41,4 +47,4 @@ npm test           # watch mode
 npm run test:run   # una corrida (CI)
 ```
 
-Estado al 2026-06-09: **191 tests, 6 módulos, todo en verde.**
+Estado al 2026-06-09: **214 tests, 8 módulos, todo en verde** (rama `frente3-8-categorias`).

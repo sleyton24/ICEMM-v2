@@ -68,6 +68,8 @@ const COST_CATS = [
   { id: 'subcontratos',        label: 'Subcontratos' },
   { id: 'gastos_generales',    label: 'Gastos Generales' },
   { id: 'equipos_maquinarias', label: 'Equipos y Maquinarias' },
+  { id: 'edificaciones_comerciales', label: 'Edificaciones Comerciales' },
+  { id: 'post_venta',          label: 'Post Venta' },
   { id: 'otros',               label: 'Otros' },
 ];
 
@@ -78,6 +80,8 @@ const DEFAULT_COST_PCTS = {
   subcontratos:        45.63,
   gastos_generales:     6.10,
   equipos_maquinarias:  4.95,
+  edificaciones_comerciales: 0,
+  post_venta:           0,
   otros:                0.01,
 };
 
@@ -89,6 +93,8 @@ const PROJ_CATS = [
   { id: 'subcontratos',        label: 'Subcontratos' },
   { id: 'gastos_generales',    label: 'Gastos Generales' },
   { id: 'equipos_maquinarias', label: 'Equipos y Maq.' },
+  { id: 'edificaciones_comerciales', label: 'Edificaciones Comerciales' },
+  { id: 'post_venta',          label: 'Post Venta' },
   { id: 'otros',               label: 'Otros' },
   { id: 'no_clasificado',      label: 'Sin Clasificar' },
 ];
@@ -2237,6 +2243,8 @@ const CLASS_LABELS = {
   subcontratos:        'Subcontratos',
   gastos_generales:    'Gastos Generales',
   equipos_maquinarias: 'Equipos y Maq.',
+  edificaciones_comerciales: 'Edificaciones Comerciales',
+  post_venta:          'Post Venta',
   otros:               'Otros',
   oficina_central:     'Oficina Central',
   no_clasificado:      '⚠ No Clasificado',
@@ -2250,9 +2258,56 @@ function classifyManagerCode(code) {
   if (n >= 300 && n <= 399) return 'subcontratos';
   if (n >= 400 && n <= 499) return 'gastos_generales';
   if (n >= 500 && n <= 549) return 'equipos_maquinarias';
-  if (n >= 600 && n <= 649) return 'otros';
+  if (n >= 600 && n <= 649) return 'edificaciones_comerciales';
+  if (n >= 700 && n <= 749) return 'post_venta';
+  if (n >= 800 && n <= 899) return 'otros';
   if (n >= 900)             return 'oficina_central';
   return 'no_clasificado';
+}
+
+// ─── MIGRACIÓN DE ESQUEMA ───────────────────────────────────────────────────────
+// v2 (2026-06): modelo de 8 categorías de costo (agrega Edificaciones Comerciales y
+// Post Venta). Reclasifica los actuals guardados re-ejecutando classifyManagerCode
+// sobre el código (concepto) ya almacenado — p.ej. 600-649 pasa de 'otros' a
+// 'edificaciones_comerciales', y 700-749 de 'no_clasificado' a 'post_venta' — y
+// completa budgetByCategory de los proyectos con las 2 nuevas familias en 0.
+// Idempotente: corre UNA vez (guarda budget-control:schema-version). No toca filas
+// sin código (concepto vacío). Como respaldo, el menú usuario tiene "Respaldar datos".
+const SCHEMA_VERSION = 2;
+function migrateSchema() {
+  try {
+    const cur = +storage.get('budget-control:schema-version') || 1;
+    if (cur >= SCHEMA_VERSION) return;
+    let reclasRows = 0, reclasKeys = 0;
+    for (let y = 2023; y <= 2032; y++) {
+      for (let m = 1; m <= 12; m++) {
+        const key = `budget-control:actuals:${y}:${String(m).padStart(2, '0')}`;
+        const d = storage.get(key);
+        if (!d || !Array.isArray(d.rows)) continue;
+        let changed = false;
+        d.rows.forEach(r => {
+          if (r.concepto == null || r.concepto === '') return; // sin código: no tocar
+          const nc = classifyManagerCode(r.concepto);
+          if (r.clasificacion !== nc) { r.clasificacion = nc; changed = true; reclasRows++; }
+        });
+        if (changed) { storage.set(key, d); reclasKeys++; }
+      }
+    }
+    const projects = storage.get('budget-control:projects');
+    if (Array.isArray(projects)) {
+      projects.forEach(p => {
+        if (p && p.budgetByCategory) {
+          if (p.budgetByCategory.edificaciones_comerciales == null) p.budgetByCategory.edificaciones_comerciales = 0;
+          if (p.budgetByCategory.post_venta == null) p.budgetByCategory.post_venta = 0;
+        }
+      });
+      storage.set('budget-control:projects', projects);
+    }
+    storage.set('budget-control:schema-version', SCHEMA_VERSION);
+    console.info(`[ICEMM] Migración v${SCHEMA_VERSION} (8 categorías) OK. Filas reclasificadas: ${reclasRows} en ${reclasKeys} meses.`);
+  } catch (e) {
+    console.error('[ICEMM] Error en migración de esquema:', e);
+  }
 }
 
 function DataLoader({ projects, activeYear }) {
@@ -2945,6 +3000,8 @@ function DataLoader({ projects, activeYear }) {
     subcontratos:        'bg-purple-100 text-purple-700',
     gastos_generales:    'bg-orange-100 text-orange-700',
     equipos_maquinarias: 'bg-cyan-100 text-cyan-700',
+    edificaciones_comerciales: 'bg-teal-100 text-teal-700',
+    post_venta:          'bg-pink-100 text-pink-700',
     otros:               'bg-gray-100 text-gray-600',
     oficina_central:     'bg-red-100 text-red-600',
     no_clasificado:      'bg-yellow-100 text-yellow-700',
@@ -2957,15 +3014,18 @@ function DataLoader({ projects, activeYear }) {
     subcontratos:        { bg: '#f3e8ff', border: '#c4b5fd', text: '#6b21a8' },
     gastos_generales:    { bg: '#ffedd5', border: '#fdba74', text: '#9a3412' },
     equipos_maquinarias: { bg: '#cffafe', border: '#67e8f9', text: '#155e75' },
+    edificaciones_comerciales: { bg: '#ccfbf1', border: '#5eead4', text: '#115e59' },
+    post_venta:          { bg: '#fce7f3', border: '#f9a8d4', text: '#9d174d' },
     otros:               { bg: '#f3f4f6', border: '#d1d5db', text: '#374151' },
     oficina_central:     { bg: '#fee2e2', border: '#fca5a5', text: '#991b1b' },
     no_clasificado:      { bg: '#fef9c3', border: '#fde047', text: '#854d0e' },
   };
 
-  const CLSF_ORDER = ['materiales','mano_de_obra','subcontratos','gastos_generales','equipos_maquinarias','otros','oficina_central','no_clasificado'];
+  const CLSF_ORDER = ['materiales','mano_de_obra','subcontratos','gastos_generales','equipos_maquinarias','edificaciones_comerciales','post_venta','otros','oficina_central','no_clasificado'];
   const CLSF_LABEL = {
     materiales:'Materiales', mano_de_obra:'Mano de Obra', subcontratos:'Subcontratos',
     gastos_generales:'Gastos Generales', equipos_maquinarias:'Equipos y Maquinarias',
+    edificaciones_comerciales:'Edificaciones Comerciales', post_venta:'Post Venta',
     otros:'Otros', oficina_central:'Oficina Central', no_clasificado:'Sin Clasificar',
   };
 
@@ -9889,6 +9949,8 @@ function CheckContableModule({ projects, activeYear }) {
     subcontratos:        'Subcontratos',
     gastos_generales:    'Gastos Generales',
     equipos_maquinarias: 'Equipos y Maq.',
+    edificaciones_comerciales: 'Edificaciones Comerciales',
+    post_venta:          'Post Venta',
     otros:               'Otros',
     oficina_central:     'Oficina Central',
     no_clasificado:      '⚠ Sin Clasificar',
@@ -11617,6 +11679,7 @@ function App() {
   );
 }
 
+migrateSchema();
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>

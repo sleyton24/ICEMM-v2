@@ -12,16 +12,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { projectMonthIdx } from './curvas.js';
-
-// Categorías de costo (fase1_proyectos.html ~65). Necesaria para snapshotProjects.
-export const COST_CATS = [
-  { id: 'materiales',          label: 'Materiales' },
-  { id: 'mano_de_obra',        label: 'Mano de Obra' },
-  { id: 'subcontratos',        label: 'Subcontratos' },
-  { id: 'gastos_generales',    label: 'Gastos Generales' },
-  { id: 'equipos_maquinarias', label: 'Equipos y Maquinarias' },
-  { id: 'otros',               label: 'Otros' },
-];
+// Fuente ÚNICA de categorías (Frente 3). Antes era una copia local de 6 categorías
+// que quedaba desincronizada del catálogo — exactamente el anti-patrón que el
+// monolito tenía replicado en 8 lugares. snapshotProjects itera estas 8 familias.
+import { COST_CATS } from './clasificacion.js';
+export { COST_CATS };
 
 // Ingreso neto mensual de un proyecto para un mes calendario (0=Ene)
 //

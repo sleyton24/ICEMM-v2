@@ -2,15 +2,16 @@
 // Extraído VERBATIM del monolito fase1_proyectos.html.
 // Golden master: preserva el comportamiento ACTUAL del monolito. NO corregir bugs aquí.
 
-// Familias de costo directo (monolito líneas ~65-72).
-// DIVERGENCIA SPEC: COST_CATS tiene SOLO 6 categorías; la spec data-model.md exige 8
-//   (faltan 'edificaciones_comerciales' y 'post_venta'). Se preserva el set de 6 ACTUAL.
+// Familias de costo directo (monolito líneas ~65-74). Frente 3: modelo de 8 categorías
+// (alineado con la spec data-model.md/SKILL.md). 'otros' queda último (catch-all del prorrateo).
 export const COST_CATS = [
   { id: 'materiales',          label: 'Materiales' },
   { id: 'mano_de_obra',        label: 'Mano de Obra' },
   { id: 'subcontratos',        label: 'Subcontratos' },
   { id: 'gastos_generales',    label: 'Gastos Generales' },
   { id: 'equipos_maquinarias', label: 'Equipos y Maquinarias' },
+  { id: 'edificaciones_comerciales', label: 'Edificaciones Comerciales' },
+  { id: 'post_venta',          label: 'Post Venta' },
   { id: 'otros',               label: 'Otros' },
 ];
 
@@ -21,6 +22,8 @@ export const DEFAULT_COST_PCTS = {
   subcontratos:        45.63,
   gastos_generales:     6.10,
   equipos_maquinarias:  4.95,
+  edificaciones_comerciales: 0,
+  post_venta:           0,
   otros:                0.01,
 };
 
@@ -31,6 +34,8 @@ export const PROJ_CATS = [
   { id: 'subcontratos',        label: 'Subcontratos' },
   { id: 'gastos_generales',    label: 'Gastos Generales' },
   { id: 'equipos_maquinarias', label: 'Equipos y Maq.' },
+  { id: 'edificaciones_comerciales', label: 'Edificaciones Comerciales' },
+  { id: 'post_venta',          label: 'Post Venta' },
   { id: 'otros',               label: 'Otros' },
   { id: 'no_clasificado',      label: 'Sin Clasificar' },
 ];
@@ -81,11 +86,11 @@ export function emptyBudget() {
   return Object.fromEntries(COST_CATS.map(c => [c.id, '']));
 }
 
-// Clasificación de código de cuenta Manager → familia de costo (monolito líneas ~2245-2256).
-// DIVERGENCIA SPEC: el rango 600-649 mapea a 'otros', pero la spec data-model.md:158
-//   indica que ese rango corresponde a "Edificaciones Comerciales". Se preserva 'otros' ACTUAL.
-// DIVERGENCIA SPEC: los rangos 650-899 (incluidos 700-749 "Post Venta" y 800-899 "Otros"
-//   según la spec) NO tienen rama y caen en 'no_clasificado'. Se preserva ACTUAL.
+// Clasificación de código de cuenta Manager → familia de costo (monolito líneas ~2245-2262).
+// Frente 3: alineado con la spec data-model.md:151-162 (8 categorías):
+//   600-649 → edificaciones_comerciales, 700-749 → post_venta, 800-899 → otros.
+// GAPS reales (no definidos ni por la spec ni por el código): 550-599, 650-699, 750-799
+//   caen en 'no_clasificado'. Vigilar: si contabilidad emite esos códigos, hay que mapearlos.
 export function classifyManagerCode(code) {
   const n = +String(code ?? '').trim();
   if (isNaN(n) || n === 0) return 'no_clasificado';
@@ -94,7 +99,9 @@ export function classifyManagerCode(code) {
   if (n >= 300 && n <= 399) return 'subcontratos';
   if (n >= 400 && n <= 499) return 'gastos_generales';
   if (n >= 500 && n <= 549) return 'equipos_maquinarias';
-  if (n >= 600 && n <= 649) return 'otros';
+  if (n >= 600 && n <= 649) return 'edificaciones_comerciales';
+  if (n >= 700 && n <= 749) return 'post_venta';
+  if (n >= 800 && n <= 899) return 'otros';
   if (n >= 900)             return 'oficina_central';
   return 'no_clasificado';
 }

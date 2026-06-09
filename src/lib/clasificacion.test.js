@@ -9,130 +9,97 @@ import {
   classifyManagerCode,
 } from './clasificacion.js';
 
-// Golden master: estos tests FIJAN el comportamiento ACTUAL del monolito.
-// Cualquier cambio de resultado en la futura modularización debe romper estos tests.
+// Golden master del modelo de 8 categorías (Frente 3). Estos tests FIJAN el
+// comportamiento ACTUAL del monolito tras la migración. classifyManagerCode quedó
+// alineado con la spec data-model.md:151-162.
 
-describe('classifyManagerCode — bordes (comportamiento ACTUAL)', () => {
+describe('classifyManagerCode — bordes (8 categorías)', () => {
   it('código 0 → no_clasificado', () => {
     expect(classifyManagerCode(0)).toBe('no_clasificado');
   });
-
   it('cadena vacía "" → no_clasificado (+"".trim() === 0)', () => {
     expect(classifyManagerCode('')).toBe('no_clasificado');
   });
-
-  it('null → no_clasificado (code ?? "" === "")', () => {
+  it('null → no_clasificado', () => {
     expect(classifyManagerCode(null)).toBe('no_clasificado');
   });
-
-  it('undefined → no_clasificado (code ?? "" === "")', () => {
+  it('undefined → no_clasificado', () => {
     expect(classifyManagerCode(undefined)).toBe('no_clasificado');
   });
-
   it('no numérico "abc" → no_clasificado (isNaN)', () => {
     expect(classifyManagerCode('abc')).toBe('no_clasificado');
   });
 
-  // Rango materiales 100-149
-  it('100 → materiales (límite inferior)', () => {
-    expect(classifyManagerCode(100)).toBe('materiales');
-  });
-  it('149 → materiales (límite superior)', () => {
-    expect(classifyManagerCode(149)).toBe('materiales');
-  });
-  it('150 → no_clasificado (justo fuera del rango materiales)', () => {
-    expect(classifyManagerCode(150)).toBe('no_clasificado');
-  });
+  // materiales 100-149
+  it('100 → materiales (límite inferior)', () => expect(classifyManagerCode(100)).toBe('materiales'));
+  it('149 → materiales (límite superior)', () => expect(classifyManagerCode(149)).toBe('materiales'));
+  it('150 → no_clasificado (hueco 150-199)', () => expect(classifyManagerCode(150)).toBe('no_clasificado'));
 
-  // Rango mano_de_obra 200-249
-  it('200 → mano_de_obra (límite inferior)', () => {
-    expect(classifyManagerCode(200)).toBe('mano_de_obra');
-  });
-  it('249 → mano_de_obra (límite superior)', () => {
-    expect(classifyManagerCode(249)).toBe('mano_de_obra');
-  });
+  // mano_de_obra 200-249
+  it('200 → mano_de_obra', () => expect(classifyManagerCode(200)).toBe('mano_de_obra'));
+  it('249 → mano_de_obra', () => expect(classifyManagerCode(249)).toBe('mano_de_obra'));
 
-  // Rango subcontratos 300-399
-  it('300 → subcontratos (límite inferior)', () => {
-    expect(classifyManagerCode(300)).toBe('subcontratos');
-  });
-  it('399 → subcontratos (límite superior)', () => {
-    expect(classifyManagerCode(399)).toBe('subcontratos');
-  });
+  // subcontratos 300-399
+  it('300 → subcontratos', () => expect(classifyManagerCode(300)).toBe('subcontratos'));
+  it('399 → subcontratos', () => expect(classifyManagerCode(399)).toBe('subcontratos'));
 
-  // Rango gastos_generales 400-499
-  it('400 → gastos_generales (límite inferior)', () => {
-    expect(classifyManagerCode(400)).toBe('gastos_generales');
-  });
-  it('499 → gastos_generales (límite superior)', () => {
-    expect(classifyManagerCode(499)).toBe('gastos_generales');
-  });
+  // gastos_generales 400-499
+  it('400 → gastos_generales', () => expect(classifyManagerCode(400)).toBe('gastos_generales'));
+  it('499 → gastos_generales', () => expect(classifyManagerCode(499)).toBe('gastos_generales'));
 
-  // Rango equipos_maquinarias 500-549
-  it('500 → equipos_maquinarias (límite inferior)', () => {
-    expect(classifyManagerCode(500)).toBe('equipos_maquinarias');
-  });
-  it('549 → equipos_maquinarias (límite superior)', () => {
-    expect(classifyManagerCode(549)).toBe('equipos_maquinarias');
-  });
-  it('550 → no_clasificado (hueco entre 550 y 599)', () => {
-    expect(classifyManagerCode(550)).toBe('no_clasificado');
-  });
+  // equipos_maquinarias 500-549
+  it('500 → equipos_maquinarias', () => expect(classifyManagerCode(500)).toBe('equipos_maquinarias'));
+  it('549 → equipos_maquinarias', () => expect(classifyManagerCode(549)).toBe('equipos_maquinarias'));
 
-  // Rango otros 600-649
-  it('600 → otros (límite inferior)', () => {
-    expect(classifyManagerCode(600)).toBe('otros');
-  });
-  it('649 → otros (límite superior)', () => {
-    expect(classifyManagerCode(649)).toBe('otros');
-  });
-  it('650 → no_clasificado (justo fuera del rango otros)', () => {
-    expect(classifyManagerCode(650)).toBe('no_clasificado');
-  });
+  // GAP 550-599
+  it('550 → no_clasificado (hueco real 550-599)', () => expect(classifyManagerCode(550)).toBe('no_clasificado'));
+  it('599 → no_clasificado (hueco real 550-599)', () => expect(classifyManagerCode(599)).toBe('no_clasificado'));
 
-  // Hueco 650-899
-  it('700 → no_clasificado (sin rama; spec lo asignaría a Post Venta)', () => {
-    expect(classifyManagerCode(700)).toBe('no_clasificado');
-  });
-  it('899 → no_clasificado (límite superior del hueco previo a 900)', () => {
-    expect(classifyManagerCode(899)).toBe('no_clasificado');
-  });
+  // edificaciones_comerciales 600-649 (NUEVO en Frente 3)
+  it('600 → edificaciones_comerciales (límite inferior)', () => expect(classifyManagerCode(600)).toBe('edificaciones_comerciales'));
+  it('649 → edificaciones_comerciales (límite superior)', () => expect(classifyManagerCode(649)).toBe('edificaciones_comerciales'));
 
-  // Oficina central n >= 900
-  it('900 → oficina_central (límite inferior)', () => {
-    expect(classifyManagerCode(900)).toBe('oficina_central');
-  });
-  it('1000 → oficina_central', () => {
-    expect(classifyManagerCode(1000)).toBe('oficina_central');
-  });
+  // GAP 650-699
+  it('650 → no_clasificado (hueco real 650-699)', () => expect(classifyManagerCode(650)).toBe('no_clasificado'));
+  it('699 → no_clasificado (hueco real 650-699)', () => expect(classifyManagerCode(699)).toBe('no_clasificado'));
 
-  // Casos adicionales de borde: tipos y espacios.
-  it('string "100" → materiales (coerción numérica)', () => {
-    expect(classifyManagerCode('100')).toBe('materiales');
-  });
-  it('"  300  " (espacios) → subcontratos (trim antes de coercionar)', () => {
-    expect(classifyManagerCode('  300  ')).toBe('subcontratos');
-  });
-  it('número de control realista: cuenta 907 (OC) → oficina_central', () => {
-    expect(classifyManagerCode('907')).toBe('oficina_central');
-  });
-  it('número de control realista: cuenta 914 (OC otros) → oficina_central', () => {
-    expect(classifyManagerCode('914')).toBe('oficina_central');
-  });
+  // post_venta 700-749 (NUEVO en Frente 3)
+  it('700 → post_venta (límite inferior)', () => expect(classifyManagerCode(700)).toBe('post_venta'));
+  it('749 → post_venta (límite superior)', () => expect(classifyManagerCode(749)).toBe('post_venta'));
+
+  // GAP 750-799
+  it('750 → no_clasificado (hueco real 750-799)', () => expect(classifyManagerCode(750)).toBe('no_clasificado'));
+  it('799 → no_clasificado (hueco real 750-799)', () => expect(classifyManagerCode(799)).toBe('no_clasificado'));
+
+  // otros 800-899 (movido en Frente 3, antes era 600-649)
+  it('800 → otros (límite inferior)', () => expect(classifyManagerCode(800)).toBe('otros'));
+  it('899 → otros (límite superior)', () => expect(classifyManagerCode(899)).toBe('otros'));
+
+  // oficina_central 900+
+  it('900 → oficina_central (límite inferior)', () => expect(classifyManagerCode(900)).toBe('oficina_central'));
+  it('1000 → oficina_central', () => expect(classifyManagerCode(1000)).toBe('oficina_central'));
+
+  // tipos y espacios
+  it('string "100" → materiales (coerción numérica)', () => expect(classifyManagerCode('100')).toBe('materiales'));
+  it('"  300  " (espacios) → subcontratos (trim)', () => expect(classifyManagerCode('  300  ')).toBe('subcontratos'));
+  it('número de control: cuenta 907 (OC) → oficina_central', () => expect(classifyManagerCode('907')).toBe('oficina_central'));
+  it('número de control: cuenta 914 (OC otros) → oficina_central', () => expect(classifyManagerCode('914')).toBe('oficina_central'));
 });
 
-describe('Constantes de categorías (comportamiento ACTUAL)', () => {
-  it('COST_CATS tiene exactamente 6 categorías', () => {
-    expect(COST_CATS.length).toBe(6);
+describe('Constantes de categorías (8 categorías)', () => {
+  it('COST_CATS tiene exactamente 8 categorías', () => {
+    expect(COST_CATS.length).toBe(8);
   });
 
-  it('COST_CATS conserva ids y orden ACTUALES', () => {
+  it('COST_CATS conserva ids y orden de la spec (otros queda último)', () => {
     expect(COST_CATS.map(c => c.id)).toEqual([
       'materiales',
       'mano_de_obra',
       'subcontratos',
       'gastos_generales',
       'equipos_maquinarias',
+      'edificaciones_comerciales',
+      'post_venta',
       'otros',
     ]);
   });
@@ -142,25 +109,29 @@ describe('Constantes de categorías (comportamiento ACTUAL)', () => {
     expect(Math.round(sum * 100) / 100).toBe(100.0);
   });
 
-  it('DEFAULT_COST_PCTS conserva los porcentajes ACTUALES', () => {
+  it('DEFAULT_COST_PCTS incluye las 8 familias (las 2 nuevas en 0)', () => {
     expect(DEFAULT_COST_PCTS).toEqual({
       materiales:          17.51,
       mano_de_obra:        25.80,
       subcontratos:        45.63,
       gastos_generales:     6.10,
       equipos_maquinarias:  4.95,
+      edificaciones_comerciales: 0,
+      post_venta:           0,
       otros:                0.01,
     });
   });
 
-  it('PROJ_CATS tiene 7 categorías (6 de costo + no_clasificado)', () => {
-    expect(PROJ_CATS.length).toBe(7);
+  it('PROJ_CATS tiene 9 categorías (8 de costo + no_clasificado)', () => {
+    expect(PROJ_CATS.length).toBe(9);
     expect(PROJ_CATS.map(c => c.id)).toEqual([
       'materiales',
       'mano_de_obra',
       'subcontratos',
       'gastos_generales',
       'equipos_maquinarias',
+      'edificaciones_comerciales',
+      'post_venta',
       'otros',
       'no_clasificado',
     ]);
@@ -199,14 +170,16 @@ describe('Constantes de categorías (comportamiento ACTUAL)', () => {
   });
 });
 
-describe('emptyBudget (comportamiento ACTUAL)', () => {
-  it('devuelve un objeto con las 6 claves de COST_CATS, todas cadena vacía', () => {
+describe('emptyBudget (8 categorías)', () => {
+  it('devuelve un objeto con las 8 claves de COST_CATS, todas cadena vacía', () => {
     expect(emptyBudget()).toEqual({
       materiales:          '',
       mano_de_obra:        '',
       subcontratos:        '',
       gastos_generales:    '',
       equipos_maquinarias: '',
+      edificaciones_comerciales: '',
+      post_venta:          '',
       otros:               '',
     });
   });
@@ -216,35 +189,34 @@ describe('emptyBudget (comportamiento ACTUAL)', () => {
   });
 });
 
-describe('divergencias con spec (a corregir en Frente 3)', () => {
-  // (a) 600-649 → 'otros' ACTUAL; la spec data-model.md:158 dice "Edificaciones Comerciales".
-  it('(a) 600-649 mapea a "otros" (spec: Edificaciones Comerciales)', () => {
-    expect(classifyManagerCode(600)).toBe('otros');
-    expect(classifyManagerCode(625)).toBe('otros');
-    expect(classifyManagerCode(649)).toBe('otros');
+describe('alineación con spec (Frente 3 — 8 categorías)', () => {
+  // El monolito ahora cumple data-model.md:151-162 para estos rangos.
+  it('600-649 → edificaciones_comerciales (antes "otros")', () => {
+    expect(classifyManagerCode(600)).toBe('edificaciones_comerciales');
+    expect(classifyManagerCode(625)).toBe('edificaciones_comerciales');
+    expect(classifyManagerCode(649)).toBe('edificaciones_comerciales');
   });
-
-  // (b) 650-899 → 'no_clasificado' ACTUAL; la spec define 700-749 Post Venta y 800-899 Otros.
-  it('(b) 700-749 (spec: Post Venta) cae en "no_clasificado"', () => {
-    expect(classifyManagerCode(700)).toBe('no_clasificado');
-    expect(classifyManagerCode(725)).toBe('no_clasificado');
-    expect(classifyManagerCode(749)).toBe('no_clasificado');
+  it('700-749 → post_venta (antes "no_clasificado")', () => {
+    expect(classifyManagerCode(700)).toBe('post_venta');
+    expect(classifyManagerCode(725)).toBe('post_venta');
+    expect(classifyManagerCode(749)).toBe('post_venta');
   });
-  it('(b) 800-899 (spec: Otros) cae en "no_clasificado"', () => {
-    expect(classifyManagerCode(800)).toBe('no_clasificado');
-    expect(classifyManagerCode(850)).toBe('no_clasificado');
-    expect(classifyManagerCode(899)).toBe('no_clasificado');
+  it('800-899 → otros (antes "no_clasificado")', () => {
+    expect(classifyManagerCode(800)).toBe('otros');
+    expect(classifyManagerCode(850)).toBe('otros');
+    expect(classifyManagerCode(899)).toBe('otros');
   });
-  it('(b) 650 y otros del hueco 650-699 caen en "no_clasificado"', () => {
-    expect(classifyManagerCode(650)).toBe('no_clasificado');
-    expect(classifyManagerCode(699)).toBe('no_clasificado');
-  });
-
-  // (c) COST_CATS tiene 6 categorías; la spec exige 8 (faltan edificaciones_comerciales y post_venta).
-  it('(c) COST_CATS tiene 6 categorías (spec exige 8: faltan edificaciones_comerciales y post_venta)', () => {
-    expect(COST_CATS.length).toBe(6);
+  it('COST_CATS ahora incluye las 8 familias de la spec', () => {
     const ids = COST_CATS.map(c => c.id);
-    expect(ids).not.toContain('edificaciones_comerciales');
-    expect(ids).not.toContain('post_venta');
+    expect(ids).toContain('edificaciones_comerciales');
+    expect(ids).toContain('post_venta');
+    expect(COST_CATS.length).toBe(8);
+  });
+
+  // GAPS reales remanentes (no definidos por la spec): vigilar con contabilidad.
+  it('huecos reales 550-599, 650-699, 750-799 siguen en no_clasificado', () => {
+    expect(classifyManagerCode(575)).toBe('no_clasificado');
+    expect(classifyManagerCode(675)).toBe('no_clasificado');
+    expect(classifyManagerCode(775)).toBe('no_clasificado');
   });
 });
