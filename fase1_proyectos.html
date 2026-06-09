@@ -11544,6 +11544,22 @@ function ControlCostosModule({ projects, activeYear }) {
     if (!activeProjects.some(p => p.id === selId)) setSelId(activeProjects[0]?.id || null);
   }, [activeProjects, selId]);
 
+  // URL de la app Control de Costos desplegada (Presto). Configurable y persistida.
+  const [ccUrl, setCcUrl] = useState(() => {
+    try { return storage.get('budget-control:cc-url') || 'http://187.127.29.98'; } catch { return 'http://187.127.29.98'; }
+  });
+  const editCcUrl = () => {
+    const v = prompt('URL de la app Control de Costos (Presto):', ccUrl);
+    if (v != null) { const u = v.trim(); storage.set('budget-control:cc-url', u); setCcUrl(u); }
+  };
+  // Vista por defecto = la app ICEMM embebida (conserva su propia carga de archivos
+  // Excel: parseItemizado/parseRealERP → backend → Postgres). 'resumen' = vista del tablero.
+  const [tab, setTab] = useState('app');
+  // Auto-cambiar a resumen si hay datos; si no, mostrar app ICEMM.
+  useEffect(() => {
+    setTab(controlMonth > 0 ? 'resumen' : 'app');
+  }, [controlMonth]);
+
   // Mismo patrón de acceso a datos que ProjectionModule/CashFlowModule.
   const controlMonth = useMemo(() => {
     for (let m = 12; m >= 1; m--) {
@@ -11604,7 +11620,7 @@ function ControlCostosModule({ projects, activeYear }) {
             </p>
           </div>
         </div>
-        {activeProjects.length > 0 && (
+        {tab === 'resumen' && activeProjects.length > 0 && (
           <select value={selId || ''} onChange={e => setSelId(e.target.value)}
             className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#C8102E]/30">
             {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name} (UN {p.unCode})</option>)}
@@ -11612,7 +11628,35 @@ function ControlCostosModule({ projects, activeYear }) {
         )}
       </div>
 
-      {!proj ? (
+      {/* Tabs: app ICEMM embebida (Presto, con su propia carga de archivos) vs resumen del tablero */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          <button onClick={() => setTab('app')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'app' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>App Presto</button>
+          <button onClick={() => setTab('resumen')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'resumen' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Resumen tablero</button>
+        </div>
+        <div className="flex-1" />
+        <button onClick={() => window.open(ccUrl, '_blank', 'noopener,noreferrer')}
+          className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-50">Abrir en pestaña ↗</button>
+        <button onClick={editCcUrl} title={`URL: ${ccUrl}`}
+          className="px-2.5 py-1.5 text-xs rounded-lg bg-white border border-gray-200 text-gray-500 hover:bg-gray-50">⚙</button>
+      </div>
+
+      {tab === 'app' && (
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <iframe src={ccUrl} title="Control de Costos (Presto)" className="w-full block"
+            style={{ height: '74vh', border: 0 }}
+            sandbox="allow-same-origin allow-scripts allow-forms allow-downloads allow-popups allow-modals" />
+          <div className="px-4 py-2 border-t border-gray-100 text-[11px] text-gray-400">
+            App ICEMM embebida desde <span className="font-mono">{ccUrl}</span> — conserva su propia carga de
+            archivos (Excel itemizado y gasto real ERP) y sus informes. Si el recuadro queda en blanco, el
+            servidor de ICEMM bloquea el iframe (X-Frame-Options): usá "Abrir en pestaña ↗" o aplicá el ajuste de Nginx.
+          </div>
+        </div>
+      )}
+
+      {tab === 'resumen' && (!proj ? (
         <div className="flex flex-col items-center justify-center h-64 gap-2 bg-white rounded-2xl border border-gray-100 shadow-sm">
           <span className="text-4xl opacity-30">🧮</span>
           <span className="text-sm font-semibold text-gray-500">No hay proyectos activos</span>
@@ -11703,7 +11747,7 @@ function ControlCostosModule({ projects, activeYear }) {
             Estados: CRÍTICO &gt;15%, ALERTA &gt;5%, EN CONTROL ±5%, FAVORABLE &lt;−5%.
           </p>
         </>
-      )}
+      ))}
     </div>
   );
 }
