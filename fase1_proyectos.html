@@ -11502,24 +11502,208 @@ function ControlObrasModule({ projects, activeYear }) {
   );
 }
 
-// ─── CONTROL DE COSTOS (en blanco — a desarrollar) ────────────────────────────
+// ─── CONTROL DE COSTOS ─────────────────────────────────────────────────────────
+// Vista interna (Estrategia A): presupuesto vs real acumulado al corte por proyecto
+// × 8 categorías, con estados de control. Reusa los datos que el monolito ya tiene
+// (actuals via getReal, budgetByCategory, classifyManagerCode). Lógica de variación
+// y estados = port de ICEMM/informe_lq.py:294-318 (espejo de src/lib/controlCostos.js,
+// testeado: 16 tests). NO conecta a PRESTO ni convierte UF.
+
+// Variación y estado (idéntico a src/lib/controlCostos.js / informe_lq.py:294-318).
+function ccVariacion(pptoUf, realUf) {
+  const ppto = +pptoUf || 0, real = +realUf || 0;
+  const variacionUf = real - ppto;
+  const variacionPct = ppto !== 0 ? (variacionUf / ppto) * 100 : null;
+  return { ppto, real, variacionUf, variacionPct };
+}
+function ccEstado(pptoUf, realUf) {
+  const real = +realUf || 0;
+  if (real === 0) return 'SIN EJECUCION';
+  const { variacionPct } = ccVariacion(pptoUf, realUf);
+  if (variacionPct === null) return 'SOLO REAL';
+  if (variacionPct > 15) return 'CRITICO';
+  if (variacionPct > 5)  return 'ALERTA';
+  if (variacionPct >= -5) return 'EN CONTROL';
+  return 'FAVORABLE';
+}
+const CC_ESTADO_STYLE = {
+  'CRITICO':       'bg-red-100 text-red-700',
+  'ALERTA':        'bg-orange-100 text-orange-700',
+  'EN CONTROL':    'bg-emerald-100 text-emerald-700',
+  'FAVORABLE':     'bg-blue-100 text-blue-700',
+  'SIN EJECUCION': 'bg-gray-100 text-gray-500',
+  'SOLO REAL':     'bg-amber-100 text-amber-700',
+};
+
 function ControlCostosModule({ projects, activeYear }) {
+  const year = activeYear;
+  const activeProjects = useMemo(() => projects.filter(p => p.startDate && p.endDate), [projects]);
+  const [selId, setSelId] = useState(() => activeProjects[0]?.id || null);
+  // Si cambia la lista de proyectos y el seleccionado ya no existe, reencuadrar al primero.
+  useEffect(() => {
+    if (!activeProjects.some(p => p.id === selId)) setSelId(activeProjects[0]?.id || null);
+  }, [activeProjects, selId]);
+
+  // Mismo patrón de acceso a datos que ProjectionModule/CashFlowModule.
+  const controlMonth = useMemo(() => {
+    for (let m = 12; m >= 1; m--) {
+      try { const d = storage.get(`budget-control:actuals:${year}:${String(m).padStart(2,'0')}`); if (d?.rows?.length > 0) return m; } catch {}
+    }
+    return 0;
+  }, [year]);
+  const actualsForYear = useMemo(() => {
+    const r = {};
+    for (let m = 1; m <= 12; m++) {
+      try { const d = storage.get(`budget-control:actuals:${year}:${String(m).padStart(2,'0')}`); if (d?.rows) r[m] = d.rows; } catch {}
+    }
+    return r;
+  }, [year]);
+  const getReal = (unCode, cat, m) =>
+    (actualsForYear[m] || []).filter(r => r.unCode === unCode && r.clasificacion === cat).reduce((s, r) => s + (+r.total || 0), 0);
+
+  const proj = activeProjects.find(p => p.id === selId) || null;
+
+  // Filas por las 8 categorías de costo: ppto total vs real acumulado al corte.
+  const rows = useMemo(() => {
+    if (!proj) return [];
+    return COST_CATS.map(cat => {
+      const ppto = +proj.budgetByCategory?.[cat.id] || 0;
+      let real = 0;
+      for (let m = 1; m <= controlMonth; m++) real += getReal(proj.unCode, cat.id, m);
+      const v = ccVariacion(ppto, real);
+      return { catId: cat.id, label: cat.label, ...v, estado: ccEstado(ppto, real) };
+    });
+  }, [proj, controlMonth, actualsForYear]);
+
+  const kpis = useMemo(() => {
+    const pptoTotal = rows.reduce((s, r) => s + r.ppto, 0);
+    const realTotal = rows.reduce((s, r) => s + r.real, 0);
+    const variacionUf = realTotal - pptoTotal;
+    const variacionPct = pptoTotal !== 0 ? variacionUf / pptoTotal * 100 : null;
+    const pctEjecucion = pptoTotal !== 0 ? realTotal / pptoTotal * 100 : null;
+    return { pptoTotal, realTotal, variacionUf, variacionPct, pctEjecucion };
+  }, [rows]);
+
+  const topSobrecostos = useMemo(
+    () => rows.filter(r => r.variacionUf > 0).sort((a, b) => b.variacionUf - a.variacionUf).slice(0, 5),
+    [rows]
+  );
+
+  const pct = v => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const varColor = v => v > 0.005 ? 'text-red-600' : v < -0.005 ? 'text-emerald-600' : 'text-gray-500';
+
   return (
     <div className="space-y-5">
-      <div className="flex items-center gap-3">
-        <div className="w-1 h-8 rounded-full" style={{ background: '#D01030' }} />
-        <div>
-          <h1 className="text-xl font-bold text-gray-900 leading-tight">Control de Costos</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Control de Resultado Obras · {activeYear}</p>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="w-1 h-8 rounded-full" style={{ background: '#D01030' }} />
+          <div>
+            <h1 className="text-xl font-bold text-gray-900 leading-tight">Control de Costos</h1>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Presupuesto vs Real al corte · {controlMonth > 0 ? `${MONTH_ABR[controlMonth-1]} ${year}` : `sin datos cargados · ${year}`}
+            </p>
+          </div>
         </div>
+        {activeProjects.length > 0 && (
+          <select value={selId || ''} onChange={e => setSelId(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#C8102E]/30">
+            {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name} (UN {p.unCode})</option>)}
+          </select>
+        )}
       </div>
-      <div className="flex flex-col items-center justify-center h-80 gap-3 bg-white rounded-2xl border border-gray-100 shadow-sm">
-        <span className="text-4xl opacity-30">🧮</span>
-        <span className="text-sm font-semibold text-gray-500">Módulo en construcción</span>
-        <span className="text-xs text-gray-400 max-w-sm text-center leading-relaxed">
-          Este módulo se desarrollará próximamente para el control de resultado de costos de obra.
-        </span>
-      </div>
+
+      {!proj ? (
+        <div className="flex flex-col items-center justify-center h-64 gap-2 bg-white rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-4xl opacity-30">🧮</span>
+          <span className="text-sm font-semibold text-gray-500">No hay proyectos activos</span>
+          <span className="text-xs text-gray-400">Agregá un proyecto con fechas de inicio y término.</span>
+        </div>
+      ) : controlMonth === 0 ? (
+        <div className="flex flex-col items-center justify-center h-64 gap-2 bg-white rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-4xl opacity-30">📂</span>
+          <span className="text-sm font-semibold text-gray-500">Sin costos reales cargados para {year}</span>
+          <span className="text-xs text-gray-400 max-w-sm text-center">Cargá el Reporte Manager en "Carga Datos Contabilidad" para ver el control de costos.</span>
+        </div>
+      ) : (
+        <>
+          {/* KPIs */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Presupuesto', value: fUF(kpis.pptoTotal), color: 'text-gray-800' },
+              { label: 'Real al corte', value: fUF(kpis.realTotal), color: 'text-gray-800' },
+              { label: 'Variación UF', value: fUF(kpis.variacionUf), color: varColor(kpis.variacionUf) },
+              { label: 'Variación %', value: pct(kpis.variacionPct), color: varColor(kpis.variacionUf) },
+              { label: '% Ejecución', value: kpis.pctEjecucion == null ? '—' : `${kpis.pctEjecucion.toFixed(1)}%`, color: 'text-blue-600' },
+            ].map((k, i) => (
+              <div key={i} className="bg-white rounded-xl border border-gray-100 shadow-sm px-4 py-3">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{k.label}</p>
+                <p className={`text-lg font-bold font-mono mt-1 ${k.color}`}>{k.value}<span className="uf-label">{k.label.includes('%') ? '' : 'UF'}</span></p>
+              </div>
+            ))}
+          </div>
+
+          {/* Tabla de control por categoría */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100"><h3 className="text-sm font-bold text-gray-700">Control por clasificación de costo</h3></div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-100 bg-gray-50">
+                  <th className="text-left px-4 py-2 font-medium">Clasificación</th>
+                  <th className="text-right px-3 py-2 font-medium">Ppto UF</th>
+                  <th className="text-right px-3 py-2 font-medium">Real UF</th>
+                  <th className="text-right px-3 py-2 font-medium">Var UF</th>
+                  <th className="text-right px-3 py-2 font-medium">Var %</th>
+                  <th className="text-center px-3 py-2 font-medium">Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.catId} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-4 py-1.5 text-gray-700">{r.label}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-gray-600">{fUF(r.ppto)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-gray-800">{fUF(r.real)}</td>
+                    <td className={`px-3 py-1.5 text-right font-mono ${varColor(r.variacionUf)}`}>{fUF(r.variacionUf)}</td>
+                    <td className={`px-3 py-1.5 text-right font-mono ${varColor(r.variacionUf)}`}>{pct(r.variacionPct)}</td>
+                    <td className="px-3 py-1.5 text-center">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${CC_ESTADO_STYLE[r.estado] || 'bg-gray-100 text-gray-500'}`}>{r.estado}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="font-bold bg-gray-50 border-t border-gray-200">
+                  <td className="px-4 py-2 text-gray-700">TOTAL</td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-700">{fUF(kpis.pptoTotal)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-900">{fUF(kpis.realTotal)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${varColor(kpis.variacionUf)}`}>{fUF(kpis.variacionUf)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${varColor(kpis.variacionUf)}`}>{pct(kpis.variacionPct)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          {/* Top sobrecostos */}
+          {topSobrecostos.length > 0 && (
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+              <h3 className="text-sm font-bold text-gray-700 mb-2">Mayores sobrecostos</h3>
+              <div className="space-y-1.5">
+                {topSobrecostos.map(r => (
+                  <div key={r.catId} className="flex items-center justify-between text-xs">
+                    <span className="text-gray-600">{r.label}</span>
+                    <span className="font-mono text-red-600">+{fUF(r.variacionUf)} UF ({pct(r.variacionPct)})</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <p className="text-[11px] text-gray-400">
+            Real acumulado de Ene a {MONTH_ABR[controlMonth-1]} {year} (Reporte Manager). Presupuesto = total por clasificación del proyecto.
+            Estados: CRÍTICO &gt;15%, ALERTA &gt;5%, EN CONTROL ±5%, FAVORABLE &lt;−5%.
+          </p>
+        </>
+      )}
     </div>
   );
 }
