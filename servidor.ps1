@@ -1,4 +1,8 @@
-param([int]$Port = 8080)
+param([int]$Port = 8080, [switch]$Expose)
+
+# -Expose : escucha en TODA la red (0.0.0.0) y abre el firewall (comportamiento antiguo).
+#           SIN -Expose (por defecto) escucha solo en 127.0.0.1 (este equipo). Es lo seguro:
+#           los datos financieros NO quedan accesibles desde la red sin TLS ni autenticacion.
 
 # PSScriptRoot puede estar vacio si se lanza con Start-Process; usar MyCommand como fallback
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -12,8 +16,9 @@ $localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
 
 if (-not $localIP) { $localIP = "desconocida" }
 
-# Iniciar TcpListener en todas las interfaces (no requiere admin)
-$endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $Port)
+# Bind: por defecto solo loopback (127.0.0.1, solo este equipo). Con -Expose, todas las interfaces.
+$bindAddr = if ($Expose) { [System.Net.IPAddress]::Any } else { [System.Net.IPAddress]::Loopback }
+$endpoint = [System.Net.IPEndPoint]::new($bindAddr, $Port)
 $listener = [System.Net.Sockets.TcpListener]::new($endpoint)
 
 try {
@@ -24,20 +29,24 @@ try {
     exit 1
 }
 
-# Intentar agregar regla de firewall (requiere admin; si falla se avisa)
-$fwMsg = "Abre el puerto $Port TCP en el Firewall de Windows para acceso desde la red."
-try {
-    $existing = Get-NetFirewallRule -DisplayName "ICEMM Presupuestario" -ErrorAction SilentlyContinue
-    if (-not $existing) {
-        New-NetFirewallRule -DisplayName "ICEMM Presupuestario" `
-            -Direction Inbound -Protocol TCP -LocalPort $Port `
-            -Action Allow -Profile Any -ErrorAction Stop | Out-Null
-        $fwMsg = "Regla de firewall creada OK para puerto $Port."
-    } else {
-        $fwMsg = "Regla de firewall ya existe para puerto $Port."
+# Firewall: SOLO se toca si se expone a la red (-Expose). En modo local no hace falta.
+if ($Expose) {
+    $fwMsg = "Abre el puerto $Port TCP en el Firewall de Windows para acceso desde la red."
+    try {
+        $existing = Get-NetFirewallRule -DisplayName "ICEMM Presupuestario" -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            New-NetFirewallRule -DisplayName "ICEMM Presupuestario" `
+                -Direction Inbound -Protocol TCP -LocalPort $Port `
+                -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+            $fwMsg = "Regla de firewall creada OK para puerto $Port."
+        } else {
+            $fwMsg = "Regla de firewall ya existe para puerto $Port."
+        }
+    } catch {
+        $fwMsg = "AVISO: ejecuta como Administrador para abrir el firewall, o hazlo manualmente (puerto $Port TCP)."
     }
-} catch {
-    $fwMsg = "AVISO: ejecuta como Administrador para abrir el firewall, o hazlo manualmente (puerto $Port TCP)."
+} else {
+    $fwMsg = "Modo LOCAL (solo este equipo). Para acceso desde la red reinicia con:  -Expose"
 }
 
 Clear-Host
@@ -46,7 +55,14 @@ Write-Host "  Control Presupuestario ICEMM" -ForegroundColor Cyan
 Write-Host "  ==========================================" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Local  :  http://localhost:$Port" -ForegroundColor White
-Write-Host "  Red    :  http://${localIP}:$Port" -ForegroundColor Green
+if ($Expose) {
+    Write-Host "  Red    :  http://${localIP}:$Port" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ADVERTENCIA: -Expose publica los datos financieros en la red SIN TLS ni" -ForegroundColor Red
+    Write-Host "  autenticacion. Usalo solo en una red de confianza." -ForegroundColor Red
+} else {
+    Write-Host "  Red    :  (deshabilitado - modo local seguro)" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "  $fwMsg" -ForegroundColor Yellow
 Write-Host ""
