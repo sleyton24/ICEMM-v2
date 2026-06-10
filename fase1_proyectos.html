@@ -4394,6 +4394,59 @@ function buildDashboardSnapshot({ year, controlMonth, kpis, chartData, summaryRo
   };
 }
 
+// Escenarios: congela la tabla de escenarios EXACTAMENTE como se renderiza (cada
+// fila ya trae label + métricas calculadas por computeScenario), el controlMonth
+// del momento y el set de proyectos activos (ids/nombres) que entraron al cálculo.
+// La vista de lectura sólo necesita `scenarios` y `controlMonth`; activeProjects
+// se guarda para trazabilidad de qué portafolio se evaluó.
+function buildScenariosSnapshot({ year, controlMonth, scenarios, activeProjects }) {
+  return {
+    year,
+    controlMonth,
+    scenarios,
+    activeProjects: (activeProjects || []).map(p => ({ id: p.id, name: p.name, unCode: p.unCode })),
+    ts: Date.now(),
+  };
+}
+
+// Check Contable: congela las dos tablas (gestión vs contabilidad) tal cual se
+// muestran. clsRows/balRows ya vienen filtradas y con labels; los escalares del
+// banner de cuadratura (totalManagement, balPerdidasUF, balGananciasUF, diff,
+// cuadra) y balanceMeta (filename/rowCount/UF) se congelan derivados. La lógica
+// de exclusión de Costos de Venta y la conversión CLP→UF NO se tocan: el snapshot
+// sólo fotografía el resultado ya calculado por los useMemo vivos.
+function buildCheckSnapshot({ year, controlMonth, clsRows, balRows, totalManagement, balPerdidasUF, balGananciasUF, balanceUF, diff, cuadra, balanceMeta }) {
+  return {
+    year,
+    controlMonth,
+    clsRows,
+    balRows,
+    totalManagement,
+    balPerdidasUF,
+    balGananciasUF,
+    balanceUF,
+    diff,
+    cuadra,
+    balanceMeta,
+    ts: Date.now(),
+  };
+}
+
+// Scorecard: congela, por proyecto activo, el objeto `scorecard` completo (los 6
+// indicadores con score + KPIs) tal como buildScorecard lo arma hoy. El Económico
+// y el Plazo se calculan de fuentes vivas (Proyecciones / curvas S), de modo que
+// sin snapshot la vista de período cerrado mostraría datos vivos: por eso se
+// fotografía aquí el resultado por proyecto. La selección de tab/proyecto se
+// resuelve en la vista a partir de byProject[id].
+function buildScorecardSnapshot({ year, byProject, activeProjects }) {
+  return {
+    year,
+    byProject,
+    activeProjects: (activeProjects || []).map(p => ({ id: p.id, name: p.name, unCode: p.unCode, status: p.status, contractType: p.contractType })),
+    ts: Date.now(),
+  };
+}
+
 // ── buildGlobalSnapshot: captura el estado completo de todos los módulos ──────
 function buildGlobalSnapshot(year, controlMonth) {
   return {
@@ -10178,6 +10231,30 @@ function EscenariosModule({ projects, activeYear }) {
     { key: 'margen',   label: 'Margen EBITDA %',    sign:  1, pct: true   },
   ];
 
+  // ── Persistencia viva del snapshot de Escenarios ────────────────────────────
+  // Mantiene `budget-control:scenarios-snapshot:{year}` al día con la tabla que se
+  // renderiza ahora. buildGlobalSnapshot lo copia al cierre (modulos.scenarios) al
+  // cerrar el mes. No escribimos cuando no hay proyectos activos (snapshot vacío)
+  // para no pisar uno significativo previo. (Mismo patrón que el Dashboard.)
+  React.useEffect(() => {
+    if (activeProjects.length === 0) return;
+    try {
+      storage.set(`budget-control:scenarios-snapshot:${year}`,
+        buildScenariosSnapshot({ year, controlMonth, scenarios, activeProjects }));
+    } catch {}
+  }, [year, controlMonth, scenarios, activeProjects]);
+
+  // ── Resolución de fuente: vivo (actual) vs congelado (período cerrado) ───────
+  // En período cerrado leemos lo que se congeló al cerrar ese mes
+  // (getCierreModulo → modulos.scenarios). Las variables `view*` alimentan el JSX,
+  // de modo que un mismo render sirve para ambos modos.
+  const isClosedView = periodoVistoES !== 'actual';
+  const frozen = isClosedView ? getCierreModulo(year, periodoVistoES, 'scenarios') : null;
+  // Cierres anteriores a Fase 3 no tienen scenarios congelado → frozen === null.
+  const frozenMissing = isClosedView && !frozen;
+  const viewScenarios    = isClosedView ? (frozen?.scenarios || []) : scenarios;
+  const viewControlMonth = isClosedView ? (frozen?.controlMonth ?? periodoVistoES) : controlMonth;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -10185,16 +10262,25 @@ function EscenariosModule({ projects, activeYear }) {
           <h1 className="text-base font-bold text-gray-800 uppercase tracking-wide">Escenarios {year}</h1>
           <p className="text-[11px] text-gray-500 mt-0.5">Impacto en EBITDA al retirar cada proyecto del portafolio</p>
         </div>
-        <button onClick={() => setRefreshKey(k => k+1)}
-          className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
-          ↻ Actualizar
-        </button>
+        {!isClosedView && (
+          <button onClick={() => setRefreshKey(k => k+1)}
+            className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+            ↻ Actualizar
+          </button>
+        )}
       </div>
 
       <PeriodSelectorBar year={year} periodoVisto={periodoVistoES} onChange={setPeriodoVistoES} />
-      {periodoVistoES !== 'actual' && <SnapshotReadonlyBanner year={year} mes={periodoVistoES} />}
+      {isClosedView && <SnapshotReadonlyBanner year={year} mes={periodoVistoES} />}
 
-      {activeProjects.length === 0 ? (
+      {frozenMissing ? (
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm">
+          No hay datos de escenarios guardados para {MONTH_ABR[periodoVistoES-1]} {year}.
+          <div className="text-[11px] mt-1 text-gray-400">
+            Este informe se cerró antes de que Escenarios congelara sus datos. Volvé a cerrar el mes desde Reporte Manager para guardarlos.
+          </div>
+        </div>
+      ) : viewScenarios.length === 0 ? (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700">
           Sin proyectos activos para {year}.
         </div>
@@ -10202,13 +10288,13 @@ function EscenariosModule({ projects, activeYear }) {
         <React.Fragment>
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
             <TopScroll>
-              <table className="text-[11px]" style={{minWidth:`${200+scenarios.length*140}px`}}>
+              <table className="text-[11px]" style={{minWidth:`${200+viewScenarios.length*140}px`}}>
                 <thead>
                   <tr>
                     <th className="sticky left-0 z-10 bg-[#1C3460] text-white px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider w-44">
                       Concepto
                     </th>
-                    {scenarios.map((s, i) => (
+                    {viewScenarios.map((s, i) => (
                       <th key={i} className={`px-4 py-2.5 text-right text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap ${s.isBase ? 'bg-blue-700 text-white' : 'bg-[#1C3460] text-gray-200'}`}>
                         {s.label}
                       </th>
@@ -10221,12 +10307,12 @@ function EscenariosModule({ projects, activeYear }) {
                       <td className={`sticky left-0 z-10 px-4 py-2 bg-white border-r border-gray-100 ${metric.bold ? 'font-semibold text-gray-700' : 'text-gray-500'}`}>
                         {metric.label}
                       </td>
-                      {scenarios.map((s, i) => {
+                      {viewScenarios.map((s, i) => {
                         const rawVal = s[metric.key];
                         const val = metric.pct ? rawVal : (rawVal || 0) * metric.sign;
                         const baseVal = metric.pct
-                          ? scenarios[0][metric.key]
-                          : (scenarios[0][metric.key] || 0) * metric.sign;
+                          ? viewScenarios[0][metric.key]
+                          : (viewScenarios[0][metric.key] || 0) * metric.sign;
                         const diff = i > 0 ? val - baseVal : null;
                         return (
                           <td key={i} className={`px-4 py-2 text-right font-mono whitespace-nowrap ${metric.bold?'font-semibold':''} ${!metric.pct && val < -0.005 ? 'text-red-600' : 'text-gray-700'} ${s.isBase ? 'bg-blue-50' : ''}`}>
@@ -10248,8 +10334,8 @@ function EscenariosModule({ projects, activeYear }) {
             </TopScroll>
             <div className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100">
               Δ: diferencia vs escenario Base ·{' '}
-              {controlMonth > 0
-                ? `Real hasta ${MONTH_ABR[controlMonth-1]} ${year}, proyectado desde ${MONTH_ABR[controlMonth]} ${year}`
+              {viewControlMonth > 0
+                ? `Real hasta ${MONTH_ABR[viewControlMonth-1]} ${year}, proyectado desde ${MONTH_ABR[viewControlMonth]} ${year}`
                 : `Solo proyección (sin datos reales)`}
             </div>
           </div>
@@ -10357,7 +10443,50 @@ function CheckContableModule({ projects, activeYear }) {
     { label: 'Pasivo',                key: 'pasivo'    },
     { label: 'Pérdidas (Gastos)',      key: 'perdidas',  bold: true },
     { label: 'Ganancias (Ingresos)',   key: 'ganancias', bold: true },
-  ].filter(r => (balanceData?.sumasIguales?.[r.key] || 0) >= 1);
+  ].filter(r => (balanceData?.sumasIguales?.[r.key] || 0) >= 1)
+   // Enriquecemos cada fila con su CLP y su UF YA convertida, para que la vista de
+   // período cerrado renderice sin recomputar la conversión CLP→UF.
+   .map(r => {
+     const clp = balanceData?.sumasIguales?.[r.key] || 0;
+     return { ...r, clp, uf: balanceUF ? clp / balanceUF : null };
+   });
+
+  // Metadatos del balance que el pie de la tabla de contabilidad muestra.
+  const balanceMeta = balanceData ? {
+    filename: balanceData.filename,
+    rowCount: balanceData.rowCount,
+    accountsLen: balanceData.accounts?.length || 0,
+  } : null;
+
+  // ── Persistencia viva del snapshot del Check Contable ───────────────────────
+  // Mantiene `budget-control:check-snapshot:{year}` al día con las dos tablas
+  // renderizadas. buildGlobalSnapshot lo copia al cierre (modulos.check). No
+  // escribimos cuando no hay datos de gestión ni balance, para no pisar uno previo.
+  React.useEffect(() => {
+    if (controlMonth === 0 && !balanceData) return;
+    try {
+      storage.set(`budget-control:check-snapshot:${year}`,
+        buildCheckSnapshot({ year, controlMonth, clsRows, balRows, totalManagement,
+          balPerdidasUF, balGananciasUF, balanceUF, diff, cuadra, balanceMeta }));
+    } catch {}
+  }, [year, controlMonth, clsRows, balRows, totalManagement, balPerdidasUF, balGananciasUF, balanceUF, diff, cuadra, balanceMeta]);
+
+  // ── Resolución de fuente: vivo (actual) vs congelado (período cerrado) ───────
+  const isClosedView = periodoVistoCC !== 'actual';
+  const frozen = isClosedView ? getCierreModulo(year, periodoVistoCC, 'check') : null;
+  const frozenMissing = isClosedView && !frozen;
+  const viewClsRows         = isClosedView ? (frozen?.clsRows || [])         : clsRows;
+  const viewBalRows         = isClosedView ? (frozen?.balRows || [])         : balRows;
+  const viewControlMonth    = isClosedView ? (frozen?.controlMonth ?? 0)     : controlMonth;
+  const viewTotalManagement = isClosedView ? (frozen?.totalManagement ?? 0)  : totalManagement;
+  const viewBalPerdidasUF   = isClosedView ? (frozen?.balPerdidasUF ?? null) : balPerdidasUF;
+  const viewBalanceUF       = isClosedView ? (frozen?.balanceUF ?? null)     : balanceUF;
+  const viewDiff            = isClosedView ? (frozen?.diff ?? null)          : diff;
+  const viewCuadra          = isClosedView ? !!frozen?.cuadra                : cuadra;
+  const viewBalanceMeta     = isClosedView ? (frozen?.balanceMeta ?? null)   : balanceMeta;
+  // En vivo la tabla de contabilidad aparece si hay balanceData; en lectura, si el
+  // snapshot congeló filas de balance (balRows) o metadatos del balance.
+  const viewHasBalance      = isClosedView ? ((viewBalRows.length > 0) || !!viewBalanceMeta) : !!balanceData;
 
   return (
     <div className="space-y-4">
@@ -10366,27 +10495,37 @@ function CheckContableModule({ projects, activeYear }) {
           <h1 className="text-base font-bold text-gray-800 uppercase tracking-wide">Check Contable {year}</h1>
           <p className="text-[11px] text-gray-500 mt-0.5">
             Cuadratura gestión (Reporte Manager) vs contabilidad (Balance Contable)
-            {controlMonth > 0 ? ` · YTD ${MONTH_ABR[controlMonth-1]} ${year}` : ''}
+            {viewControlMonth > 0 ? ` · YTD ${MONTH_ABR[viewControlMonth-1]} ${year}` : ''}
           </p>
         </div>
-        <button onClick={() => setRefreshKey(k => k+1)}
-          className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
-          ↻ Actualizar
-        </button>
+        {!isClosedView && (
+          <button onClick={() => setRefreshKey(k => k+1)}
+            className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+            ↻ Actualizar
+          </button>
+        )}
       </div>
 
       <PeriodSelectorBar year={year} periodoVisto={periodoVistoCC} onChange={setPeriodoVistoCC} />
-      {periodoVistoCC !== 'actual' && <SnapshotReadonlyBanner year={year} mes={periodoVistoCC} />}
+      {isClosedView && <SnapshotReadonlyBanner year={year} mes={periodoVistoCC} />}
 
-      {diff !== null && (
-        <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${cuadra ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
-          <span className="text-2xl">{cuadra ? '✅' : '⚠️'}</span>
+      {frozenMissing ? (
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm">
+          No hay datos de check contable guardados para {MONTH_ABR[periodoVistoCC-1]} {year}.
+          <div className="text-[11px] mt-1 text-gray-400">
+            Este informe se cerró antes de que el Check Contable congelara sus datos. Volvé a cerrar el mes desde Reporte Manager para guardarlos.
+          </div>
+        </div>
+      ) : (<>
+      {viewDiff !== null && (
+        <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${viewCuadra ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+          <span className="text-2xl">{viewCuadra ? '✅' : '⚠️'}</span>
           <div>
-            <p className={`font-semibold text-sm ${cuadra ? 'text-emerald-700' : 'text-red-700'}`}>
-              {cuadra ? 'Cuadratura OK — diferencia menor a 1 UF' : `Diferencia de ${diff.toFixed(2)} UF — revisar`}
+            <p className={`font-semibold text-sm ${viewCuadra ? 'text-emerald-700' : 'text-red-700'}`}>
+              {viewCuadra ? 'Cuadratura OK — diferencia menor a 1 UF' : `Diferencia de ${viewDiff.toFixed(2)} UF — revisar`}
             </p>
-            <p className={`text-xs mt-0.5 ${cuadra ? 'text-emerald-600' : 'text-red-600'}`}>
-              Gestión: {fN(totalManagement)} UF · Balance Pérdidas: {fN(balPerdidasUF)} UF · Diferencia: {diff.toFixed(2)} UF
+            <p className={`text-xs mt-0.5 ${viewCuadra ? 'text-emerald-600' : 'text-red-600'}`}>
+              Gestión: {fN(viewTotalManagement)} UF · Balance Pérdidas: {fN(viewBalPerdidasUF)} UF · Diferencia: {viewDiff.toFixed(2)} UF
             </p>
           </div>
         </div>
@@ -10396,9 +10535,9 @@ function CheckContableModule({ projects, activeYear }) {
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
             <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Gestión — Reporte Manager</h3>
-            {controlMonth > 0 && <span className="text-[10px] text-gray-400">YTD {MONTH_ABR[controlMonth-1]} {year}</span>}
+            {viewControlMonth > 0 && <span className="text-[10px] text-gray-400">YTD {MONTH_ABR[viewControlMonth-1]} {year}</span>}
           </div>
-          {controlMonth === 0 ? (
+          {viewControlMonth === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-gray-400">Sin datos Reporte Manager para {year}</div>
           ) : (
             <table className="w-full text-[11px]">
@@ -10409,7 +10548,7 @@ function CheckContableModule({ projects, activeYear }) {
                 </tr>
               </thead>
               <tbody>
-                {clsRows.map(r => (
+                {viewClsRows.map(r => (
                   <tr key={r.cls} className="border-t border-gray-50 hover:bg-gray-50">
                     <td className="px-4 py-1.5 text-gray-600">{r.label}</td>
                     <td className="px-4 py-1.5 text-right font-mono text-gray-700">{fN(r.value)}</td>
@@ -10417,7 +10556,7 @@ function CheckContableModule({ projects, activeYear }) {
                 ))}
                 <tr className="border-t-2 border-gray-200 bg-gray-50">
                   <td className="px-4 py-2 font-semibold text-gray-700">Total Gastos YTD</td>
-                  <td className="px-4 py-2 text-right font-mono font-semibold text-gray-800">{fN(totalManagement)}</td>
+                  <td className="px-4 py-2 text-right font-mono font-semibold text-gray-800">{fN(viewTotalManagement)}</td>
                 </tr>
               </tbody>
             </table>
@@ -10427,9 +10566,9 @@ function CheckContableModule({ projects, activeYear }) {
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
             <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Contabilidad — Balance</h3>
-            {balanceData && <span className="text-[10px] text-gray-400 truncate max-w-40">{balanceData.filename}</span>}
+            {viewBalanceMeta?.filename && <span className="text-[10px] text-gray-400 truncate max-w-40">{viewBalanceMeta.filename}</span>}
           </div>
-          {!balanceData ? (
+          {!viewHasBalance ? (
             <div className="px-4 py-8 text-center text-xs text-gray-400">
               Balance no cargado. Ve a <strong>Carga Datos Contabilidad</strong> para cargarlo.
             </div>
@@ -10444,34 +10583,31 @@ function CheckContableModule({ projects, activeYear }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {balRows.map((r, i) => {
-                    const clp = balanceData.sumasIguales?.[r.key] || 0;
-                    const ufVal = balanceUF ? clp / balanceUF : null;
-                    return (
-                      <tr key={i} className={`border-t border-gray-50 ${r.bold ? 'bg-blue-50' : 'hover:bg-gray-50'}`}>
-                        <td className={`px-4 py-1.5 ${r.bold ? 'font-semibold text-blue-700' : 'text-gray-600'}`}>{r.label}</td>
-                        <td className="px-3 py-1.5 text-right font-mono text-[10px] text-gray-500">{fCLP(clp)}</td>
-                        <td className={`px-3 py-1.5 text-right font-mono ${r.bold ? 'font-semibold text-blue-700' : 'text-gray-600'}`}>
-                          {ufVal != null ? fN(ufVal) : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {viewBalRows.map((r, i) => (
+                    <tr key={i} className={`border-t border-gray-50 ${r.bold ? 'bg-blue-50' : 'hover:bg-gray-50'}`}>
+                      <td className={`px-4 py-1.5 ${r.bold ? 'font-semibold text-blue-700' : 'text-gray-600'}`}>{r.label}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-[10px] text-gray-500">{fCLP(r.clp)}</td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${r.bold ? 'font-semibold text-blue-700' : 'text-gray-600'}`}>
+                        {r.uf != null ? fN(r.uf) : '—'}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
-              {!balanceUF && (
+              {!viewBalanceUF && (
                 <div className="px-4 py-2 text-[10px] text-amber-600 bg-amber-50 border-t border-amber-100">
                   ⚠ Tabla UF no cargada para el período del balance — conversión no disponible.
                 </div>
               )}
               <div className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100">
-                {balanceData.rowCount} filas · {balanceData.accounts?.length || 0} cuentas con movimientos
-                {balanceUF ? ` · UF período: ${balanceUF.toLocaleString('es-CL',{minimumFractionDigits:2})} CLP` : ''}
+                {viewBalanceMeta?.rowCount ?? 0} filas · {viewBalanceMeta?.accountsLen ?? 0} cuentas con movimientos
+                {viewBalanceUF ? ` · UF período: ${viewBalanceUF.toLocaleString('es-CL',{minimumFractionDigits:2})} CLP` : ''}
               </div>
             </React.Fragment>
           )}
         </div>
       </div>
+      </>)}
     </div>
   );
 }
@@ -10655,15 +10791,54 @@ function ScorecardModule({ projects, activeYear }) {
   }, [activeProjects]);
 
   const selProject = activeProjects.find(p => p.id === selTab) || activeProjects[0];
-  const isActive   = selProject?.status === 'en_ejecucion';
-  const obrasVals  = selProject ? getObrasVals(year, selProject.id, periodoVistoSC) : null;
-  const scorecard  = selProject ? buildScorecard(selProject, year, obrasVals) : null;
+
+  // Scorecard VIVO por cada proyecto activo (incluye Económico/Plazo automáticos).
+  // Se calcula para TODOS los proyectos para poder congelarlos en bloque al cerrar
+  // el mes. La vista de período cerrado lee este mismo objeto desde el snapshot.
+  const byProjectLive = useMemo(() => {
+    const out = {};
+    activeProjects.forEach(p => {
+      const ov = getObrasVals(year, p.id, periodoVistoSC);
+      out[p.id] = buildScorecard(p, year, ov);
+    });
+    return out;
+  }, [activeProjects, year, periodoVistoSC]);
+
+  // ── Persistencia viva del snapshot del Scorecard ────────────────────────────
+  // Mantiene `budget-control:scorecard-snapshot:{year}` al día con el scorecard
+  // por proyecto que se renderiza ahora. buildGlobalSnapshot lo copia al cierre
+  // (modulos.scorecard). El gap que resuelve: el Económico y el Plazo se calculan
+  // de fuentes vivas (Proyecciones / curvas S), así que sin este congelado un mes
+  // cerrado mostraría esos dos indicadores con datos vivos bajo el banner de solo
+  // lectura. Sólo persistimos en período 'actual' (no congelamos una vista de un
+  // mes ya cerrado, y evitamos pisar el snapshot con datos de meses anteriores).
+  // No escribimos si no hay proyectos activos, para no pisar uno significativo.
+  React.useEffect(() => {
+    if (periodoVistoSC !== 'actual' || activeProjects.length === 0) return;
+    try {
+      storage.set(`budget-control:scorecard-snapshot:${year}`,
+        buildScorecardSnapshot({ year, byProject: byProjectLive, activeProjects }));
+    } catch {}
+  }, [year, periodoVistoSC, byProjectLive, activeProjects]);
+
+  // ── Resolución de fuente: vivo (actual) vs congelado (período cerrado) ───────
+  const isClosedView = periodoVistoSC !== 'actual';
+  const frozen = isClosedView ? getCierreModulo(year, periodoVistoSC, 'scorecard') : null;
+  const frozenMissing = isClosedView && !frozen;
+  // Proyectos a mostrar en tabs: en lectura, los que existían al cierre.
+  const viewProjects = isClosedView ? (frozen?.activeProjects || []) : activeProjects;
+  const viewSelProject = viewProjects.find(p => p.id === selTab) || viewProjects[0] || selProject;
+  const isActive   = viewSelProject?.status === 'en_ejecucion';
+  // scorecard del proyecto seleccionado: vivo o congelado.
+  const scorecard  = isClosedView
+    ? (viewSelProject ? (frozen?.byProject?.[viewSelProject.id] || null) : null)
+    : (selProject ? byProjectLive[selProject.id] : null);
 
   const scoreVals = scorecard ? Object.values(scorecard).map(v => v?.score).filter(s => s != null) : [];
   const globalScore = scoreVals.length ? Math.round(scoreVals.reduce((a, b) => a + b, 0) / scoreVals.length) : null;
   const globalRag = ragSC(globalScore);
 
-  if (!activeProjects.length) {
+  if (!activeProjects.length && !isClosedView) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-2 text-gray-500">
         <span className="text-4xl">🏗️</span>
@@ -10689,13 +10864,30 @@ function ScorecardModule({ projects, activeYear }) {
       </div>
 
       <PeriodSelectorBar year={year} periodoVisto={periodoVistoSC} onChange={setPeriodoVistoSC} />
-      {periodoVistoSC !== 'actual' && <SnapshotReadonlyBanner year={year} mes={periodoVistoSC} />}
+      {isClosedView && <SnapshotReadonlyBanner year={year} mes={periodoVistoSC} />}
 
+      {frozenMissing && (
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm">
+          No hay datos de scorecard guardados para {MONTH_ABR[periodoVistoSC-1]} {year}.
+          <div className="text-[11px] mt-1 text-gray-400">
+            Este informe se cerró antes de que el Scorecard congelara sus datos. Volvé a cerrar el mes desde Reporte Manager para guardarlos.
+          </div>
+        </div>
+      )}
+
+      {!frozenMissing && viewProjects.length === 0 && (
+        <div className="flex flex-col items-center justify-center h-64 gap-2 text-gray-500">
+          <span className="text-4xl">🏗️</span>
+          <span className="text-sm font-medium">No hay proyectos configurados</span>
+        </div>
+      )}
+
+      {!frozenMissing && viewProjects.length > 0 && (<>
       {/* ── Tabs de proyectos ─────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-1 bg-white rounded-xl border border-gray-200 p-1 shadow-sm w-fit max-w-full">
-        {activeProjects.map(p => {
-          const name = projCompletion?.[p.id]?.replacementName || p.name;
-          const isSel = p.id === selTab;
+        {viewProjects.map(p => {
+          const name = (!isClosedView && projCompletion?.[p.id]?.replacementName) || p.name;
+          const isSel = p.id === (viewSelProject?.id ?? selTab);
           const statusDot = p.status === 'en_ejecucion'
             ? <span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}} className="mr-1" />
             : <span style={{width:6,height:6,borderRadius:'50%',background:'#94a3b8',display:'inline-block'}} className="mr-1" />;
@@ -10712,7 +10904,7 @@ function ScorecardModule({ projects, activeYear }) {
         })}
       </div>
 
-      {selProject && (
+      {viewSelProject && (
         <>
           {/* ── Tarjeta resumen global ──────────────────────────── */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
@@ -10728,10 +10920,10 @@ function ScorecardModule({ projects, activeYear }) {
                   <RagBadgeSC rag={globalRag} />
                   <div className="mt-2">
                     <div className="text-[13px] font-bold text-gray-800">
-                      {projCompletion?.[selProject.id]?.replacementName || selProject.name}
+                      {(!isClosedView && projCompletion?.[viewSelProject.id]?.replacementName) || viewSelProject.name}
                     </div>
                     <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-2">
-                      <span>{selProject.contractType === 'suma_alzada' ? 'Suma Alzada' : 'Admin. Delegada'}</span>
+                      <span>{viewSelProject.contractType === 'suma_alzada' ? 'Suma Alzada' : 'Admin. Delegada'}</span>
                       <span className="text-gray-600">·</span>
                       <span className={isActive ? 'text-emerald-600 font-semibold' : 'text-gray-500'}>
                         {isActive ? '● En Ejecución' : '○ Planificado'}
@@ -10818,6 +11010,7 @@ function ScorecardModule({ projects, activeYear }) {
           </div>
         </>
       )}
+      </>)}
     </div>
   );
 }
