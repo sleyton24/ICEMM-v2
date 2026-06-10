@@ -11615,14 +11615,14 @@ function UsersModule({ currentUser, onUsersChange }) {
 }
 
 // ─── CONTROL DE OBRAS (captura manual de indicadores) ─────────────────────────
-function ObrasField({ field, value, onChange }) {
+function ObrasField({ field, value, onChange, disabled = false }) {
   if (field.type === 'bool') {
     return (
       <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white">
         <span className="text-[11px] text-gray-600">{field.label}</span>
-        <button type="button" onClick={() => onChange(value === true ? false : true)}
+        <button type="button" disabled={disabled} onClick={() => onChange(value === true ? false : true)}
           className={`text-[10px] font-bold px-2.5 py-1 rounded-full transition-colors
-            ${value === true ? 'bg-emerald-50 text-emerald-600' : value === false ? 'bg-red-50 text-red-500' : 'bg-gray-100 text-gray-400'}`}>
+            ${value === true ? 'bg-emerald-50 text-emerald-600' : value === false ? 'bg-red-50 text-red-500' : 'bg-gray-100 text-gray-400'} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
           {value === true ? 'Sí' : value === false ? 'No' : '—'}
         </button>
       </div>
@@ -11635,9 +11635,9 @@ function ObrasField({ field, value, onChange }) {
       <div className="flex items-center gap-1 min-w-0">
         <input
           type={isText ? 'text' : 'text'} inputMode={isText ? 'text' : 'decimal'}
-          value={value ?? ''} onChange={e => onChange(e.target.value)}
+          value={value ?? ''} onChange={e => onChange(e.target.value)} disabled={disabled}
           placeholder={isText ? '—' : '0'}
-          className={`text-[12px] font-mono bg-transparent outline-none text-gray-800 ${isText ? 'w-28 text-right' : 'w-16 text-right'}`} />
+          className={`text-[12px] font-mono bg-transparent outline-none text-gray-800 ${isText ? 'w-28 text-right' : 'w-16 text-right'} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`} />
         {field.unit && <span className="text-[9px] text-gray-400 w-8">{field.unit}</span>}
       </div>
     </div>
@@ -11892,6 +11892,8 @@ function ControlObrasModule({ projects, activeYear }) {
 
   const selProject = activeProjects.find(p => p.id === selTab) || activeProjects[0];
   const mm = pad(mes);
+  // Mes ya cerrado (informe inmutable): no se editan indicadores retroactivamente.
+  const isClosed = useMemo(() => getCierresList(year).includes(mes), [year, mes]);
   const curVals = (selProject && data?.[selProject.id]?.[mm]) || {};
 
   // Avance real/programado derivado de las curvas S (si están cargadas) → alimenta Plazo
@@ -11901,6 +11903,7 @@ function ControlObrasModule({ projects, activeYear }) {
   );
 
   const setField = (areaId, fieldKey, val) => {
+    if (isClosed) return;
     setData(prev => {
       const next = JSON.parse(JSON.stringify(prev || {}));
       next[selProject.id] = next[selProject.id] || {};
@@ -11912,7 +11915,7 @@ function ControlObrasModule({ projects, activeYear }) {
     setDirty(true);
   };
 
-  const save = () => { storage.set(`budget-control:control-obras:${year}`, data); setDirty(false); };
+  const save = () => { if (isClosed) return; storage.set(`budget-control:control-obras:${year}`, data); setDirty(false); };
 
   if (!activeProjects.length) {
     return (
@@ -11946,12 +11949,17 @@ function ControlObrasModule({ projects, activeYear }) {
               {MONTH_ABR.map((m, i) => <option key={i} value={i + 1}>{m} {year}</option>)}
             </select>
           </div>
-          <Btn variant={dirty ? 'primary' : 'ghost'} onClick={save} disabled={!dirty}>
-            {dirty ? '● Guardar Cambios' : '✓ Guardado'}
+          <Btn variant={dirty && !isClosed ? 'primary' : 'ghost'} onClick={save} disabled={!dirty || isClosed}>
+            {isClosed ? '🔒 Mes cerrado' : dirty ? '● Guardar Cambios' : '✓ Guardado'}
           </Btn>
         </div>
       </div>
 
+      {isClosed && (
+        <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5 text-[11px] text-blue-700">
+          <span>🔒</span> {MONTH_ABR[mes-1]} {year} es un mes cerrado (informe inmutable). Los indicadores son de solo lectura; elegí un mes abierto para editar.
+        </div>
+      )}
       {/* Tabs de proyectos */}
       <div className="flex flex-wrap items-center gap-1 bg-white rounded-xl border border-gray-200 p-1 shadow-sm w-fit max-w-full">
         {activeProjects.map(p => {
@@ -12026,7 +12034,7 @@ function ControlObrasModule({ projects, activeYear }) {
                       return (
                         <ObrasField key={f.key} field={f}
                           value={vals?.[f.key]}
-                          onChange={v => setField(area.id, f.key, v)} />
+                          onChange={v => setField(area.id, f.key, v)} disabled={isClosed} />
                       );
                     })}
                   </div>
