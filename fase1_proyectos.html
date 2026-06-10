@@ -5064,54 +5064,6 @@ function ProjectionModule({ projects, activeYear }) {
     setPcEditKey(null);
   }
 
-  // Projection cells: { 1..12 → { v, s } }  s = 'real'|'projected'|'override'
-  function buildCells(project, cat) {
-    const ov = overrides?.[project.id]?.[cat] || {};
-    const effProject = getEffectiveProject(project);
-    const [endYear, endMonth] = (effProject.endDate || `${year}-12`).split('-').map(Number);
-    const N_new = Math.max(1, monthsBetween(effProject.startDate, effProject.endDate));
-    const scaledCurve = reescalarCurva(project.costCurve || [], N_new);
-
-    let sumReal = 0;
-    for (let m = 1; m <= controlMonth; m++) sumReal += getReal(project.unCode, cat, m);
-    let sumFutureOv = 0;
-    for (let m = controlMonth + 1; m <= 12; m++) {
-      if (ov[m] !== undefined) sumFutureOv += +ov[m];
-    }
-    const projTotal = projCompletion?.[project.id]?.cats?.[cat] != null
-      ? +projCompletion[project.id].cats[cat]
-      : (+project.budgetByCategory?.[cat] || 0);
-    const saldo = Math.max(0, projTotal - sumReal - sumFutureOv);
-
-    // Enumerar TODOS los meses futuros del proyecto (multi-año) para normalizar la curva
-    const futureMths = [];
-    for (let fy = year; fy <= endYear; fy++) {
-      const sm = fy === year ? controlMonth + 1 : 1;
-      const em = fy === endYear ? endMonth : 12;
-      for (let m = sm; m <= em; m++) {
-        if (fy === year && ov[m] !== undefined) continue;
-        const idx = projectMonthIdx(effProject, fy, m - 1);
-        const w = (idx >= 0 && idx < scaledCurve.length) ? scaledCurve[idx] : 0;
-        futureMths.push({ fy, m, w });
-      }
-    }
-    const totalW = futureMths.reduce((s, x) => s + x.w, 0);
-
-    const cells = {};
-    for (let m = 1; m <= 12; m++) {
-      if (m <= controlMonth) {
-        cells[m] = { v: getReal(project.unCode, cat, m), s: 'real' };
-      } else if (ov[m] !== undefined) {
-        cells[m] = { v: +ov[m], s: 'override' };
-      } else {
-        const fm = futureMths.find(x => x.fy === year && x.m === m);
-        const proj = fm ? (totalW > 0 ? saldo * fm.w / totalW : 0) : 0;
-        cells[m] = { v: proj, s: 'projected' };
-      }
-    }
-    return cells;
-  }
-
   function buildMultiYearCells(project, cat) {
     const ov = overrides?.[project.id]?.[cat] || {};
     const effProject = getEffectiveProject(project);
@@ -5473,292 +5425,6 @@ function ProjectionModule({ projects, activeYear }) {
     </th>
   ));
 
-  function renderProjectTable(project) {
-    const allMulti = {};
-    PROJ_CATS.forEach(c => { allMulti[c.id] = buildMultiYearCells(project, c.id); });
-    const { firstYear, endYear, endMonth } = allMulti[PROJ_CATS[0].id];
-
-    const yearCols = [];
-    for (let fy = firstYear; fy <= endYear; fy++) {
-      const em = fy === endYear ? endMonth : 12;
-      yearCols.push({ fy, months: Array.from({ length: em }, (_, i) => i + 1) });
-    }
-
-    const totalBudget = PROJ_CATS.reduce((s, c) => s + (+project.budgetByCategory?.[c.id] || 0), 0);
-    const totalProjTotal = PROJ_CATS.reduce((s, c) => s + allMulti[c.id].projTotal, 0);
-
-    const cellStyle = s => {
-      if (s === 'outside') return 'px-2 py-1.5 text-right text-xs text-gray-200 border-r border-gray-50 bg-gray-50/40';
-      if (s === 'real')    return 'px-2 py-1.5 text-right text-xs text-gray-500 border-r border-gray-50 bg-gray-100 select-none';
-      if (s === 'override') return 'px-2 py-1.5 text-right text-xs border-r border-amber-200 bg-amber-50';
-      if (s === 'future')  return 'px-2 py-1.5 text-right text-xs text-indigo-600 border-r border-indigo-50 bg-indigo-50/30';
-      return 'px-2 py-1.5 text-right text-xs text-gray-700 border-r border-gray-50 bg-white';
-    };
-
-    // Barra de ajuste de ritmo de costos
-    const costoShiftCur = projCompletion?.[project.id]?.curvaShift?.costos || 0;
-
-    // Datos para gráfico: presupuesto original vs proyectado con shift (ciclo completo del proyecto)
-    const effPrj = getEffectiveProject(project);
-    const cFlatM = [];
-    for (let fy = firstYear; fy <= endYear; fy++) {
-      const em = fy === endYear ? endMonth : 12;
-      for (let m = 1; m <= em; m++) cFlatM.push({ fy, m });
-    }
-    const cLabels  = cFlatM.map(({ fy, m }) => `${MONTH_ABR[m-1]}-${String(fy).slice(2)}`);
-    const cCtrlIdx = cFlatM.findIndex(({ fy, m }) => fy === year && m === controlMonth);
-    const cBudget  = cFlatM.map(({ fy, m }) =>
-      PROJ_CATS.reduce((s, c) => {
-        const idx = projectMonthIdx(effPrj, fy, m - 1);
-        return s + (idx >= 0 ? (+project.budgetByCategory?.[c.id] || 0) * (project.costCurve?.[idx] || 0) / 100 : 0);
-      }, 0)
-    );
-    const cProj = cFlatM.map(({ fy, m }) =>
-      PROJ_CATS.reduce((s, c) => s + (allMulti[c.id].byYear[fy]?.[m]?.v || 0), 0)
-    );
-
-    return (
-      <div>
-        {/* Panel de ajuste de ritmo de curva */}
-        {(() => {
-          const costoFijada = !!projCompletion?.[project.id]?.curvaShift?.fijadaCostos;
-          const tryUnlockCosto = () => {
-            if (window.confirm('¿Seguro de modificar la curva de costos?\n\nSe liberará el ajuste guardado.')) {
-              saveProjCompletion([project.id, 'curvaShift', 'fijadaCostos'], false);
-            }
-          };
-          return (
-            <div className="flex items-center gap-3 px-4 py-2 border-b border-white/10" style={{background:'#1C1F2C'}}>
-              <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider whitespace-nowrap">Ritmo curva costos:</span>
-              <div className="flex items-center gap-1.5">
-                {costoFijada ? (
-                  <>
-                    <button onClick={tryUnlockCosto} title="Curva fijada — clic para modificar"
-                      className="w-5 h-5 flex items-center justify-center rounded text-amber-400 hover:text-amber-300 text-xs" style={{background:'rgba(180,100,0,0.25)'}}>🔒</button>
-                    <input type="range" min="-20" max="20" step="0.5" value={costoShiftCur} readOnly
-                      onClick={tryUnlockCosto}
-                      className="w-32 h-1 accent-indigo-400 cursor-pointer opacity-50" />
-                    <button onClick={tryUnlockCosto} title="Curva fijada — clic para modificar"
-                      className="w-5 h-5 flex items-center justify-center rounded text-amber-400 hover:text-amber-300 text-xs" style={{background:'rgba(180,100,0,0.25)'}}>🔒</button>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={() => saveProjCompletion([project.id, 'curvaShift', 'costos'], Math.max(-20, Math.round((costoShiftCur - 0.5) * 10) / 10))}
-                      className="w-5 h-5 flex items-center justify-center rounded bg-white/10 text-gray-300 hover:bg-white/20 text-xs font-bold">−</button>
-                    <input type="range" min="-20" max="20" step="0.5" value={costoShiftCur}
-                      onChange={e => saveProjCompletion([project.id, 'curvaShift', 'costos'], +e.target.value)}
-                      className="w-32 h-1 accent-indigo-400 cursor-pointer" />
-                    <button onClick={() => saveProjCompletion([project.id, 'curvaShift', 'costos'], Math.min(20, Math.round((costoShiftCur + 0.5) * 10) / 10))}
-                      className="w-5 h-5 flex items-center justify-center rounded bg-white/10 text-gray-300 hover:bg-white/20 text-xs font-bold">+</button>
-                  </>
-                )}
-                <span className={`text-[11px] font-mono w-12 text-center font-bold
-                  ${costoShiftCur > 0 ? 'text-emerald-400' : costoShiftCur < 0 ? 'text-orange-400' : 'text-gray-500'}`}>
-                  {costoShiftCur > 0 ? '+' : ''}{costoShiftCur}%
-                </span>
-                {!costoFijada && costoShiftCur !== 0 && (
-                  <button onClick={() => saveProjCompletion([project.id, 'curvaShift', 'costos'], 0)}
-                    className="text-[9px] text-gray-500 hover:text-gray-300 ml-0.5">✕</button>
-                )}
-                {costoFijada ? (
-                  <button onClick={tryUnlockCosto}
-                    className="text-[9px] border rounded px-2 py-0.5 text-amber-400 hover:text-amber-300 ml-1 whitespace-nowrap" style={{borderColor:'rgba(180,100,0,0.5)', background:'rgba(180,100,0,0.20)'}}>
-                    🔒 Fijada
-                  </button>
-                ) : (
-                  <button onClick={() => saveProjCompletion([project.id, 'curvaShift', 'fijadaCostos'], true)}
-                    className="text-[9px] border border-white/20 rounded px-2 py-0.5 text-gray-400 hover:text-gray-200 hover:border-white/40 ml-1 whitespace-nowrap">
-                    Fijar curva
-                  </button>
-                )}
-              </div>
-              {!costoFijada && costoShiftCur !== 0 && (
-                <span className="text-[9px] text-amber-400">
-                  ⚡ {costoShiftCur > 0 ? 'acelerada' : 'retrasada'} {Math.abs(costoShiftCur)}%
-                </span>
-              )}
-              {costoFijada && (
-                <span className="text-[9px] text-amber-400/70">
-                  curva fijada{costoShiftCur !== 0 ? ` · ${costoShiftCur > 0 ? '+' : ''}${costoShiftCur}%` : ' · sin ajuste'}
-                </span>
-              )}
-            </div>
-          );
-        })()}
-      <TopScroll style={{maxWidth:'100%'}}>
-        <table className="text-xs border-collapse">
-          <thead>
-            {/* Fila 1: toggles de año */}
-            <tr style={{background:'#12141A'}}>
-              <th className="px-3 py-2 text-left text-[10px] font-bold text-gray-400 sticky left-0 z-20 border-r border-white/10"
-                style={{background:'#0f172a', minWidth:160}}>Clasificación</th>
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                const isPast   = fy < year;
-                const isActive = fy === year;
-                const yearColor = isPast ? 'text-gray-400 hover:text-gray-200' : isActive ? 'text-amber-300 hover:text-amber-200' : 'text-indigo-300 hover:text-indigo-200';
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && (
-                      <th colSpan={months.length}
-                        className={`px-2 py-2 text-center text-[10px] font-bold border-r border-white/5 ${isPast ? 'text-gray-400' : isActive ? 'text-white' : 'text-indigo-300'}`}>
-                      </th>
-                    )}
-                    <th className={`px-2 py-2 text-center text-[10px] font-bold border-r border-white/20 cursor-pointer select-none ${yearColor}`}
-                      style={{minWidth: expanded ? 84 : 110}}
-                      onClick={() => toggleYear(fy)}>
-                      {expanded ? `− ${fy}` : `+ ${fy}`}
-                    </th>
-                  </React.Fragment>
-                );
-              })}
-              <th className="px-2 py-2 text-center text-[10px] font-bold text-emerald-300 border-l border-white/20" style={{minWidth:100}}>∑ TOTAL</th>
-            </tr>
-            {/* Fila 2: meses (solo años expandidos) */}
-            <tr style={{background:'#1C1F2C'}}>
-              <th className="px-3 py-1.5 sticky left-0 z-20 border-r border-white/10" style={{background:'#1C1F2C'}} />
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                const isPast   = fy < year;
-                const isActive = fy === year;
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && months.map(m => (
-                      <th key={m} className={`px-1 py-1.5 text-center text-[9px] font-semibold border-r border-white/5
-                          ${isPast ? 'text-gray-500' : isActive && m <= controlMonth ? 'text-gray-500' : isActive ? 'text-gray-300' : 'text-indigo-400'}`}
-                        style={{minWidth:70}}>
-                        {MONTH_ABR[m-1]}-{String(fy).slice(2)}
-                      </th>
-                    ))}
-                    <th className={`px-1 py-1.5 text-center text-[9px] border-r border-white/20
-                        ${isActive ? 'text-amber-400' : 'text-indigo-300'}`}
-                      style={{minWidth: expanded ? 84 : 110}}>
-                      {expanded ? `∑ ${fy}` : `∑ ${fy}`}
-                    </th>
-                  </React.Fragment>
-                );
-              })}
-              <th className="px-1 py-1.5 text-center text-[9px] text-emerald-400" style={{minWidth:100}}>∑ Proy</th>
-            </tr>
-            {/* Fila 3: presupuesto */}
-            <tr style={{background:'#12141A'}}>
-              <td className="px-3 py-1 text-[10px] text-gray-500 sticky left-0 z-20 border-r border-white/5" style={{background:'#12141A'}}>Presupuesto</td>
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && months.map(m => (
-                      <td key={m} className="px-2 py-1 text-right text-[10px] text-gray-600 font-mono border-r border-white/5">—</td>
-                    ))}
-                    <td className="px-2 py-1 text-right text-[10px] text-gray-500 font-mono border-r border-white/20"
-                      style={{minWidth: expanded ? 84 : 110}}>
-                      {fy === year ? fNum(totalBudget) : '—'}
-                    </td>
-                  </React.Fragment>
-                );
-              })}
-              <td className="px-2 py-1 text-right text-[10px] text-gray-400 font-mono font-semibold" style={{minWidth:100}}>{fNum(totalBudget)}</td>
-            </tr>
-          </thead>
-          <tbody>
-            {PROJ_CATS.map(cat => {
-              const { byYear, projTotal } = allMulti[cat.id];
-              const budget = +project.budgetByCategory?.[cat.id] || 0;
-              return (
-                <tr key={cat.id} className="border-b border-gray-100 hover:bg-blue-50/10">
-                  <td className="px-3 py-1.5 font-medium text-gray-700 sticky left-0 bg-white border-r border-gray-100 z-10">{cat.label}</td>
-                  {yearCols.map(({ fy, months }) => {
-                    const expanded = !!expandedYears[fy];
-                    const yrTotal = months.reduce((s, m) => s + (byYear[fy]?.[m]?.v || 0), 0);
-                    return (
-                      <React.Fragment key={fy}>
-                        {expanded && months.map(m => {
-                          const cell = byYear[fy]?.[m] || { v: 0, s: 'outside' };
-                          if (fy === year && cell.s !== 'real' && cell.s !== 'outside') {
-                            return renderCell(cell, `${project.id}:${cat.id}:${m}`, [project.id, cat.id, m]);
-                          }
-                          return (
-                            <td key={m} className={cellStyle(cell.s)} style={{minWidth:70}}>
-                              {cell.v !== 0 ? fNum(cell.v) : <span className="text-gray-300">—</span>}
-                            </td>
-                          );
-                        })}
-                        <td className={`px-2 py-1.5 text-right text-xs font-semibold border-l border-r
-                            ${fy < year  ? 'border-gray-200 bg-gray-50/60 text-gray-600'
-                            : fy === year ? 'border-amber-200 bg-amber-50/60 text-amber-800'
-                            : 'border-indigo-100 bg-indigo-50/40 text-indigo-700'}`}
-                          style={{minWidth: expanded ? 84 : 110}}>
-                          {yrTotal !== 0 ? fNum(yrTotal) : '—'}
-                        </td>
-                      </React.Fragment>
-                    );
-                  })}
-                  <td className={`px-2 py-1.5 text-right text-xs font-bold border-l border-gray-200 bg-emerald-50
-                      ${projTotal > budget * 1.05 ? 'text-red-600' : 'text-emerald-700'}`}
-                    style={{minWidth:100}}>
-                    {projTotal !== 0 ? <>{fNum(projTotal)}<span className="uf-label text-current">UF</span></> : '—'}
-                    {budget > 0 && <div className="text-[9px] font-normal text-gray-400">{fNum(budget)}<span className="uf-label">UF</span> ppto</div>}
-                  </td>
-                </tr>
-              );
-            })}
-            {/* Fila total */}
-            <tr style={{background:'#1f2937'}}>
-              <td className="px-3 py-2 font-bold text-white sticky left-0 z-10 text-xs uppercase tracking-wide border-r border-white/10"
-                style={{background:'#1f2937'}}>TOTAL</td>
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                const yrTot = PROJ_CATS.reduce((s, c) => s + months.reduce((ss, m) => ss + (allMulti[c.id].byYear[fy]?.[m]?.v || 0), 0), 0);
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && months.map(m => {
-                      const tot = PROJ_CATS.reduce((s, c) => s + (allMulti[c.id].byYear[fy]?.[m]?.v || 0), 0);
-                      return (
-                        <td key={m} className={`px-2 py-2 text-right text-xs font-bold border-r border-white/10
-                            ${fy < year ? 'text-gray-500'
-                            : fy === year && m <= controlMonth ? 'text-gray-400'
-                            : fy > year ? 'text-indigo-300' : 'text-emerald-400'}`}>
-                          {tot !== 0 ? fNum(tot) : '—'}
-                        </td>
-                      );
-                    })}
-                    <td className={`px-2 py-2 text-right text-xs font-bold border-l border-r border-white/20 bg-white/5
-                        ${fy < year ? 'text-gray-400' : fy === year ? 'text-amber-300' : 'text-indigo-300'}`}
-                      style={{minWidth: expanded ? 84 : 110}}>
-                      {yrTot !== 0 ? fNum(yrTot) : '—'}
-                    </td>
-                  </React.Fragment>
-                );
-              })}
-              <td className="px-2 py-2 text-right text-xs font-bold text-emerald-300 border-l border-white/20 bg-white/5" style={{minWidth:100}}>
-                {fNum(totalProjTotal)}<span className="uf-label text-emerald-300/50">UF</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </TopScroll>
-      <div style={{padding:'0 12px 14px', borderTop:'1px solid #e2e8f0'}}>
-        <CurveChart
-          title="Valores mensuales"
-          series={[
-            { label: 'Presupuesto', color: '#3b82f6', dashed: false, values: cBudget },
-            { label: 'Proyectado',  color: '#f97316', dashed: true,  values: cProj  },
-          ]}
-          months={cLabels} controlIdx={cCtrlIdx} shift={costoShiftCur} unit=" UF"
-        />
-        <CurveChart
-          title="Curva S — Acumulado"
-          series={[
-            { label: 'Presupuesto', color: '#2563eb', dashed: false, values: toCumulative(cBudget) },
-            { label: 'Proyectado',  color: '#ea580c', dashed: true,  values: toCumulative(cProj)   },
-          ]}
-          months={cLabels} controlIdx={cCtrlIdx} shift={costoShiftCur} unit=" UF"
-        />
-      </div>
-    </div>
-    );
-  }
-
   function downloadOCTemplate() {
     const futureMonths = Array.from({ length: 12 }, (_, i) => i + 1).filter(m => m > controlMonth);
     if (!futureMonths.length) {
@@ -5954,408 +5620,6 @@ function ProjectionModule({ projects, activeYear }) {
           months={ocChartLabels} controlIdx={ocCtrlIdx} shift={0} unit=" UF"
         />
       </div>
-      </div>
-    );
-  }
-
-  function renderIngresosTable() {
-    const allIng = activeProjects.map(p => ({ project: p, data: buildMultiYearIngresosCells(p) }));
-
-    // Rango de años unificado para todos los proyectos
-    const globalFirstYear = Math.min(...allIng.map(({ data }) => data.firstYear));
-    const globalEndYear   = Math.max(...allIng.map(({ data }) => data.endYear));
-    const globalEndMonth  = Math.max(...allIng
-      .filter(({ data }) => data.endYear === globalEndYear)
-      .map(({ data }) => data.endMonth));
-
-    const yearCols = [];
-    for (let fy = globalFirstYear; fy <= globalEndYear; fy++) {
-      const em = fy === globalEndYear ? globalEndMonth : 12;
-      yearCols.push({ fy, months: Array.from({ length: em }, (_, i) => i + 1) });
-    }
-
-    const cellStyle = s => {
-      if (s === 'outside') return 'px-2 py-1.5 text-right text-xs text-gray-200 border-r border-gray-50 bg-gray-50/40';
-      if (s === 'real')    return 'px-2 py-1.5 text-right text-xs text-gray-500 border-r border-gray-50 bg-gray-100 select-none';
-      if (s === 'future')  return 'px-2 py-1.5 text-right text-xs text-indigo-600 border-r border-indigo-50 bg-indigo-50/30';
-      return 'px-2 py-1.5 text-right text-xs text-gray-700 border-r border-gray-50 bg-white';
-    };
-
-    // Datos para gráfico ingresos: presupuesto original vs proyectado con shift (suma proyectos, ciclo global)
-    const ingFlatM = [];
-    yearCols.forEach(({ fy, months }) => months.forEach(m => ingFlatM.push({ fy, m })));
-    const ingLabels  = ingFlatM.map(({ fy, m }) => `${MONTH_ABR[m-1]}-${String(fy).slice(2)}`);
-    const ingCtrlIdx = ingFlatM.findIndex(({ fy, m }) => fy === year && m === controlMonth);
-    const ingBudget  = ingFlatM.map(({ fy, m }) =>
-      allIng.reduce((s, { project: p }) => {
-        const effP = getEffectiveProject(p);
-        const idx  = projectMonthIdx(effP, fy, m - 1);
-        if (idx < 0) return s;
-        if (p.contractType === 'suma_alzada')
-          return s + (+p.contract.originalAmount || 0) * (p.revenueCurve?.[idx] || 0) / 100;
-        return s + (+p.contract.totalBudgetedCost || 0) * (p.costCurve?.[idx] || 0) / 100
-          + (+p.contract.monthlyFee || 0) + (+p.contract.monthlyGG || 0);
-      }, 0)
-    );
-    const ingProj = ingFlatM.map(({ fy, m }) =>
-      allIng.reduce((s, { data }) => s + (data.byYear[fy]?.[m]?.v || 0), 0)
-    );
-
-    return (
-      <div>
-      <TopScroll style={{maxWidth:'100%'}}>
-        <table className="text-xs border-collapse">
-          <thead>
-            {/* Fila 1: toggles de año */}
-            <tr style={{background:'#12141A'}}>
-              <th className="px-3 py-2 text-left text-[10px] font-bold text-gray-400 sticky left-0 z-20 border-r border-white/10"
-                style={{background:'#0f172a', minWidth:230}}>Proyecto · Ritmo ↑↓</th>
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                const isPast = fy < year; const isActive = fy === year;
-                const yearColor = isPast ? 'text-gray-400 hover:text-gray-200' : isActive ? 'text-amber-300 hover:text-amber-200' : 'text-indigo-300 hover:text-indigo-200';
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && <th colSpan={months.length} className={`px-2 py-2 text-center text-[10px] font-bold border-r border-white/5 ${isPast ? 'text-gray-400' : isActive ? 'text-white' : 'text-indigo-300'}`} />}
-                    <th className={`px-2 py-2 text-center text-[10px] font-bold border-r border-white/20 cursor-pointer select-none ${yearColor}`}
-                      style={{minWidth: expanded ? 84 : 110}} onClick={() => toggleYear(fy)}>
-                      {expanded ? `− ${fy}` : `+ ${fy}`}
-                    </th>
-                  </React.Fragment>
-                );
-              })}
-              <th className="px-2 py-2 text-center text-[10px] font-bold text-emerald-300 border-l border-white/20" style={{minWidth:110}}>∑ TOTAL</th>
-            </tr>
-            {/* Fila 2: meses */}
-            <tr style={{background:'#1C1F2C'}}>
-              <th className="px-3 py-1.5 sticky left-0 z-20 border-r border-white/10" style={{background:'#1C1F2C'}} />
-              {yearCols.map(({ fy, months }) => {
-                const expanded = !!expandedYears[fy];
-                const isPast = fy < year; const isActive = fy === year;
-                return (
-                  <React.Fragment key={fy}>
-                    {expanded && months.map(m => (
-                      <th key={m} className={`px-1 py-1.5 text-center text-[9px] font-semibold border-r border-white/5
-                          ${isPast ? 'text-gray-500' : isActive && m <= controlMonth ? 'text-gray-500' : isActive ? 'text-gray-300' : 'text-indigo-400'}`}
-                        style={{minWidth:70}}>{MONTH_ABR[m-1]}-{String(fy).slice(2)}</th>
-                    ))}
-                    <th className={`px-1 py-1.5 text-center text-[9px] border-r border-white/20 ${isPast ? 'text-gray-400' : isActive ? 'text-amber-400' : 'text-indigo-300'}`}
-                      style={{minWidth: expanded ? 84 : 110}}>∑ {fy}</th>
-                  </React.Fragment>
-                );
-              })}
-              <th className="px-1 py-1.5 text-center text-[9px] text-emerald-400" style={{minWidth:110}}>Cto. Vigente</th>
-            </tr>
-          </thead>
-          <tbody>
-            {allIng.map(({ project: p, data }) => {
-              const { byYear, projTotal } = data;
-              return (
-                <tr key={p.id} className="border-b border-gray-100 hover:bg-blue-50/10">
-                  <td className="px-3 py-1.5 text-gray-700 sticky left-0 bg-white border-r border-gray-100 z-10" style={{minWidth:230}}>
-                    <div>
-                      <span className="font-mono text-gray-400 text-[10px] mr-1.5">{p.unCode}</span>
-                      {projCompletion?.[p.id]?.replacementName || p.name}
-                      {projCompletion?.[p.id]?.replacementName && (
-                        <span className="ml-1 text-[9px] text-amber-500 font-medium">(reemplaza {p.name})</span>
-                      )}
-                      <span className="ml-1 text-[9px] text-gray-400">({p.contractType === 'suma_alzada' ? 'SA' : 'AD'})</span>
-                    </div>
-                    {/* Selector de ritmo de curva de ingresos */}
-                    {(() => {
-                      const cur = projCompletion?.[p.id]?.curvaShift?.ingresos || 0;
-                      const fijada = !!projCompletion?.[p.id]?.curvaShift?.fijadaIngresos;
-                      const tryUnlock = () => {
-                        if (window.confirm('¿Seguro de modificar la curva de ingresos?\n\nSe liberará el ajuste guardado.')) {
-                          saveProjCompletion([p.id, 'curvaShift', 'fijadaIngresos'], false);
-                        }
-                      };
-                      return (
-                        <div className="flex items-center gap-1 mt-1">
-                          {fijada ? (
-                            <>
-                              <button onClick={tryUnlock} title="Curva fijada — clic para modificar"
-                                className="w-4 h-4 flex items-center justify-center rounded bg-amber-100 text-amber-500 hover:bg-amber-200 text-xs leading-none">🔒</button>
-                              <input type="range" min="-20" max="20" step="0.5" value={cur} readOnly
-                                onClick={tryUnlock}
-                                className="w-24 h-1 accent-indigo-500 cursor-pointer opacity-50" />
-                              <button onClick={tryUnlock} title="Curva fijada — clic para modificar"
-                                className="w-4 h-4 flex items-center justify-center rounded bg-amber-100 text-amber-500 hover:bg-amber-200 text-xs leading-none">🔒</button>
-                            </>
-                          ) : (
-                            <>
-                              <button onClick={() => saveProjCompletion([p.id, 'curvaShift', 'ingresos'], Math.max(-20, Math.round((cur - 0.5) * 10) / 10))}
-                                className="w-4 h-4 flex items-center justify-center rounded bg-gray-100 text-gray-500 hover:bg-gray-200 text-xs font-bold leading-none">−</button>
-                              <input type="range" min="-20" max="20" step="0.5" value={cur}
-                                onChange={e => saveProjCompletion([p.id, 'curvaShift', 'ingresos'], +e.target.value)}
-                                className="w-24 h-1 accent-indigo-500 cursor-pointer" />
-                              <button onClick={() => saveProjCompletion([p.id, 'curvaShift', 'ingresos'], Math.min(20, Math.round((cur + 0.5) * 10) / 10))}
-                                className="w-4 h-4 flex items-center justify-center rounded bg-gray-100 text-gray-500 hover:bg-gray-200 text-xs font-bold leading-none">+</button>
-                            </>
-                          )}
-                          <span className={`text-[9px] font-mono w-10 text-center font-bold
-                            ${cur > 0 ? 'text-emerald-600' : cur < 0 ? 'text-orange-500' : 'text-gray-300'}`}>
-                            {cur > 0 ? '+' : ''}{cur}%
-                          </span>
-                          {!fijada && cur !== 0 && (
-                            <button onClick={() => saveProjCompletion([p.id, 'curvaShift', 'ingresos'], 0)}
-                              className="text-[8px] text-gray-300 hover:text-gray-500 leading-none">✕</button>
-                          )}
-                          {fijada ? (
-                            <button onClick={tryUnlock}
-                              className="text-[8px] bg-amber-100 border border-amber-300 rounded px-1.5 py-0.5 text-amber-600 hover:bg-amber-200 ml-0.5 whitespace-nowrap">
-                              🔒 Fijada
-                            </button>
-                          ) : (
-                            <button onClick={() => saveProjCompletion([p.id, 'curvaShift', 'fijadaIngresos'], true)}
-                              className="text-[8px] border border-gray-300 rounded px-1.5 py-0.5 text-gray-400 hover:text-gray-600 hover:border-gray-400 ml-0.5 whitespace-nowrap">
-                              Fijar curva
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </td>
-                  {yearCols.map(({ fy, months }) => {
-                    const expanded = !!expandedYears[fy];
-                    const yrTotal = months.reduce((s, m) => s + (byYear[fy]?.[m]?.v || 0), 0);
-                    const pct = v => projTotal > 0 && v > 0
-                      ? <div className="text-[8px] text-red-400/70 leading-none mt-0.5 tabular-nums">{(v/projTotal*100).toFixed(1)}%</div>
-                      : null;
-                    return (
-                      <React.Fragment key={fy}>
-                        {expanded && months.map(m => {
-                          const cell = byYear[fy]?.[m] || { v: 0, s: 'outside' };
-                          if (fy === year && cell.s !== 'real' && cell.s !== 'outside') {
-                            return renderCell(cell, `ing:${p.id}:${fy}:${m}`, ['ingresos', p.id, m]);
-                          }
-                          return (
-                            <td key={m} className={cellStyle(cell.s)} style={{minWidth:70}}>
-                              {cell.v !== 0 ? <>{fNum(cell.v)}{pct(cell.v)}</> : <span className="text-gray-300">—</span>}
-                            </td>
-                          );
-                        })}
-                        <td className={`px-2 py-1.5 text-right text-xs font-semibold border-l border-r
-                            ${fy < year ? 'border-gray-200 bg-gray-50/60 text-gray-600'
-                            : fy === year ? 'border-amber-200 bg-amber-50/60 text-amber-800'
-                            : 'border-indigo-100 bg-indigo-50/40 text-indigo-700'}`}
-                          style={{minWidth: expanded ? 84 : 110}}>
-                          {yrTotal !== 0 ? <>{fNum(yrTotal)}{pct(yrTotal)}</> : '—'}
-                        </td>
-                      </React.Fragment>
-                    );
-                  })}
-                  <td className="px-2 py-1.5 text-right text-xs font-bold border-l border-gray-200 bg-emerald-50 text-emerald-700" style={{minWidth:110}}>
-                    {projTotal !== 0 ? <>{fNum(projTotal)}<span className="uf-label text-current">UF</span></> : '—'}
-                  </td>
-                </tr>
-              );
-            })}
-            {/* Otros Ingresos (Asesorías) — UN01 del Mayor excluyendo intereses */}
-            {(() => {
-              const otrosOv = overrides?.otrosIngresos || {};
-              // Para un mes del año activo: override manual > real Mayor > 0
-              const getOtrosCell = m => {
-                if (otrosOv[m] != null) return { v: +otrosOv[m], s: 'override' };
-                if (m <= controlMonth) {
-                  const mayorVal = getMayorAsesoriasUF(m);
-                  return { v: mayorVal !== null ? mayorVal : 0, s: 'real' };
-                }
-                return { v: 0, s: 'projected' };
-              };
-              const yrOtrosTot = yearCols.find(({fy}) => fy === year)?.months
-                .reduce((s, m) => s + getOtrosCell(m).v, 0) || 0;
-              const totalOtros = (yearCols.find(({fy}) => fy === year)?.months || [])
-                .reduce((s, m) => s + getOtrosCell(m).v, 0);
-              return (
-                <tr className="border-b border-gray-100 hover:bg-green-50/10">
-                  <td className="px-3 py-1.5 sticky left-0 bg-white border-r border-gray-100 z-10 text-xs">
-                    <span className="text-gray-500 italic">Otros Ingresos (Asesorías)</span>
-                    {!mayorData && <span className="ml-1 text-[9px] text-amber-400">sin Mayor</span>}
-                  </td>
-                  {yearCols.map(({ fy, months }) => {
-                    const expanded = !!expandedYears[fy];
-                    const yrTot = fy === year ? months.reduce((s, m) => s + getOtrosCell(m).v, 0) : 0;
-                    return (
-                      <React.Fragment key={fy}>
-                        {expanded && months.map(m => {
-                          if (fy !== year) {
-                            return <td key={m} className={cellStyle('outside')} style={{minWidth:70}}><span className="text-gray-300">—</span></td>;
-                          }
-                          const cell = getOtrosCell(m);
-                          // Meses futuros: editables (override manual)
-                          if (m > controlMonth) {
-                            return renderCell({ v: cell.v, s: otrosOv[m] != null ? 'override' : 'projected' }, `otros:${fy}:${m}`, ['otrosIngresos', m]);
-                          }
-                          // Meses pasados: real del Mayor (read-only) o override
-                          return (
-                            <td key={m} className={cellStyle(cell.s)} style={{minWidth:70}}>
-                              {cell.v !== 0 ? fNum(cell.v) : <span className="text-gray-300">—</span>}
-                            </td>
-                          );
-                        })}
-                        <td className={`px-2 py-1.5 text-right text-xs font-semibold border-l border-r
-                            ${fy < year ? 'border-gray-200 bg-gray-50/60 text-gray-600'
-                            : fy === year ? 'border-amber-200 bg-amber-50/60 text-amber-800'
-                            : 'border-indigo-100 bg-indigo-50/40 text-indigo-700'}`}
-                          style={{minWidth: expanded ? 84 : 110}}>
-                          {yrTot !== 0 ? fNum(yrTot) : '—'}
-                        </td>
-                      </React.Fragment>
-                    );
-                  })}
-                  <td className="px-2 py-1.5 text-right text-xs font-bold border-l border-gray-200 bg-emerald-50 text-emerald-700" style={{minWidth:110}}>
-                    {totalOtros !== 0 ? <>{fNum(totalOtros)}<span className="uf-label text-current">UF</span></> : '—'}
-                  </td>
-                </tr>
-              );
-            })()}
-
-            {/* Intereses Ganados — cuenta 5-2-01-002 de UN01, solo del Mayor */}
-            {(() => {
-              const hasMayorInteres = !!mayorData?.byUN?.UN01?.byAccount?.[INTERES_CTA];
-              if (!hasMayorInteres && controlMonth === 0) return null; // ocultar si no hay datos y no hay año activo
-              const getInteresCell = m => {
-                if (m > controlMonth) return { v: 0, s: 'outside' };
-                const v = getMayorInteresUF(m);
-                return { v: v !== null ? v : 0, s: 'real' };
-              };
-              const yrIntTot = yearCols.find(({fy}) => fy === year)?.months
-                .reduce((s, m) => s + getInteresCell(m).v, 0) || 0;
-              const totalInt = (yearCols.find(({fy}) => fy === year)?.months || [])
-                .reduce((s, m) => s + getInteresCell(m).v, 0);
-              if (!hasMayorInteres) return null;
-              return (
-                <tr className="border-b border-gray-100 bg-blue-50/20">
-                  <td className="px-3 py-1.5 sticky left-0 bg-blue-50/30 border-r border-gray-100 z-10 text-xs">
-                    <span className="text-blue-600 italic">Intereses Ganados</span>
-                    <span className="ml-1 text-[9px] text-blue-400">cta. {INTERES_CTA}</span>
-                  </td>
-                  {yearCols.map(({ fy, months }) => {
-                    const expanded = !!expandedYears[fy];
-                    const yrTot = fy === year ? months.reduce((s, m) => s + getInteresCell(m).v, 0) : 0;
-                    return (
-                      <React.Fragment key={fy}>
-                        {expanded && months.map(m => {
-                          if (fy !== year) return <td key={m} className={cellStyle('outside')} style={{minWidth:70}}><span className="text-gray-300">—</span></td>;
-                          const cell = getInteresCell(m);
-                          return (
-                            <td key={m} className={cellStyle(cell.s)} style={{minWidth:70}}>
-                              {cell.v !== 0 ? fNum(cell.v) : <span className="text-gray-300">—</span>}
-                            </td>
-                          );
-                        })}
-                        <td className={`px-2 py-1.5 text-right text-xs font-semibold border-l border-r
-                            ${fy < year ? 'border-gray-200 bg-gray-50/60 text-gray-600'
-                            : fy === year ? 'border-blue-200 bg-blue-50/60 text-blue-700'
-                            : 'border-indigo-100 bg-indigo-50/40 text-indigo-700'}`}
-                          style={{minWidth: expanded ? 84 : 110}}>
-                          {yrTot !== 0 ? fNum(yrTot) : '—'}
-                        </td>
-                      </React.Fragment>
-                    );
-                  })}
-                  <td className="px-2 py-1.5 text-right text-xs font-bold border-l border-blue-200 bg-blue-50 text-blue-700" style={{minWidth:110}}>
-                    {totalInt !== 0 ? <>{fNum(totalInt)}<span className="uf-label text-current">UF</span></> : '—'}
-                  </td>
-                </tr>
-              );
-            })()}
-
-            {/* Total */}
-            {(() => {
-              const otrosOv = overrides?.otrosIngresos || {};
-              // Valor real de "Otros Ingresos" para un mes: override > Mayor asesorías > 0
-              const getOtrosV = m => {
-                if (otrosOv[m] != null) return +otrosOv[m];
-                if (m <= controlMonth) { const v = getMayorAsesoriasUF(m); return v !== null ? v : 0; }
-                return 0;
-              };
-              // Valor real de "Intereses" para un mes
-              const getInteresV = m => m <= controlMonth ? (getMayorInteresUF(m) || 0) : 0;
-              // Gran total: proyectos + asesorías (año activo) + intereses (año activo)
-              const currentYrMonths = yearCols.find(({fy}) => fy === year)?.months || [];
-              const grandOtros = currentYrMonths.reduce((s, m) => s + getOtrosV(m), 0);
-              const grandInt   = currentYrMonths.reduce((s, m) => s + getInteresV(m), 0);
-              return (
-                <tr style={{background:'#1f2937'}}>
-                  <td className="px-3 py-2 font-bold text-white sticky left-0 z-10 text-xs uppercase tracking-wide border-r border-white/10" style={{background:'#1f2937'}}>TOTAL INGRESOS</td>
-                  {yearCols.map(({ fy, months }) => {
-                    const expanded = !!expandedYears[fy];
-                    const otros = fy === year ? months.reduce((s, m) => s + getOtrosV(m), 0) : 0;
-                    const int   = fy === year ? months.reduce((s, m) => s + getInteresV(m), 0) : 0;
-                    const yrTot = allIng.reduce((s, { data }) => s + months.reduce((ss, m) => ss + (data.byYear[fy]?.[m]?.v || 0), 0), 0) + otros + int;
-                    return (
-                      <React.Fragment key={fy}>
-                        {expanded && months.map(m => {
-                          const otrosM = fy === year ? getOtrosV(m) : 0;
-                          const intM   = fy === year ? getInteresV(m) : 0;
-                          const tot = allIng.reduce((s, { data }) => s + (data.byYear[fy]?.[m]?.v || 0), 0) + otrosM + intM;
-                          return (
-                            <td key={m} className={`px-2 py-2 text-right text-xs font-bold border-r border-white/10
-                                ${fy < year ? 'text-gray-500' : fy === year && m <= controlMonth ? 'text-gray-400' : fy > year ? 'text-indigo-300' : 'text-emerald-400'}`}>
-                              {tot !== 0 ? fNum(tot) : '—'}
-                            </td>
-                          );
-                        })}
-                        <td className={`px-2 py-2 text-right text-xs font-bold border-l border-r border-white/20 bg-white/5
-                            ${fy < year ? 'text-gray-400' : fy === year ? 'text-amber-300' : 'text-indigo-300'}`}
-                          style={{minWidth: expanded ? 84 : 110}}>
-                          {yrTot !== 0 ? fNum(yrTot) : '—'}
-                        </td>
-                      </React.Fragment>
-                    );
-                  })}
-                  <td className="px-2 py-2 text-right text-xs font-bold text-emerald-300 border-l border-white/20 bg-white/5" style={{minWidth:110}}>
-                    {fNum(allIng.reduce((s, { data }) => s + data.projTotal, 0) + grandOtros + grandInt)}
-                    <span className="uf-label text-emerald-300/50">UF</span>
-                  </td>
-                </tr>
-              );
-            })()}
-          </tbody>
-        </table>
-      </TopScroll>
-      {/* Gráficos de curva de ingresos — uno por proyecto */}
-      {allIng.map(({ project: p, data }) => {
-        const pBudget = ingFlatM.map(({ fy, m }) => {
-          const effP = getEffectiveProject(p);
-          const idx  = projectMonthIdx(effP, fy, m - 1);
-          if (idx < 0) return 0;
-          if (p.contractType === 'suma_alzada')
-            return (+p.contract.originalAmount || 0) * (p.revenueCurve?.[idx] || 0) / 100;
-          return (+p.contract.totalBudgetedCost || 0) * (p.costCurve?.[idx] || 0) / 100
-            + (+p.contract.monthlyFee || 0) + (+p.contract.monthlyGG || 0);
-        });
-        const pProj = ingFlatM.map(({ fy, m }) => data.byYear[fy]?.[m]?.v || 0);
-        const pName = projCompletion?.[p.id]?.replacementName || p.name;
-        return (
-          <div key={p.id} style={{borderTop:'1px solid #e2e8f0', padding:'6px 12px 14px'}}>
-            <div style={{fontSize:11, fontWeight:700, color:'#374151', padding:'6px 0 2px', paddingLeft:6,
-              display:'flex', alignItems:'center', gap:8}}>
-              <span style={{fontFamily:'monospace', fontSize:10, color:'#94a3b8'}}>{p.unCode}</span>
-              {pName}
-              {p.isOffBudget && <span style={{fontSize:9, color:'#f59e0b', fontWeight:600}}>Fuera de Ppto</span>}
-            </div>
-            <CurveChart
-              title="Valores mensuales"
-              series={[
-                { label: 'Presupuesto', color: '#3b82f6', dashed: false, values: pBudget },
-                { label: 'Proyectado',  color: '#f97316', dashed: true,  values: pProj  },
-              ]}
-              months={ingLabels} controlIdx={ingCtrlIdx} shift={0} unit=" UF"
-            />
-            <CurveChart
-              title="Curva S — Acumulado"
-              series={[
-                { label: 'Presupuesto', color: '#2563eb', dashed: false, values: toCumulative(pBudget) },
-                { label: 'Proyectado',  color: '#ea580c', dashed: true,  values: toCumulative(pProj)   },
-              ]}
-              months={ingLabels} controlIdx={ingCtrlIdx} shift={0} unit=" UF"
-            />
-          </div>
-        );
-      })}
       </div>
     );
   }
@@ -7368,6 +6632,14 @@ function ProjectionModule({ projects, activeYear }) {
             );
           })()}
           <button
+            onClick={() => {
+              const l = prompt('Nombre del informe de proyecciones:');
+              if (l && l.trim()) saveProjSnapshot(l.trim(), new Date().toISOString().slice(0,10));
+            }}
+            className="text-xs text-white bg-[#1C3460] hover:bg-[#2d4f7f] rounded px-3 py-1"
+            title="Guardar un informe de proyecciones para comparar"
+          >💾 Guardar informe</button>
+          <button
             onClick={() => setRefreshKey(k => k + 1)}
             className="text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-2 py-1 hover:bg-gray-50"
             title="Recargar datos reales desde storage"
@@ -7544,6 +6816,14 @@ function ProjectionModule({ projects, activeYear }) {
         </div>
       ) : (
         <>
+          {/* ── Comparación (solo en modo actual) ── */}
+          <ReportSnapshotBar
+            year={year}
+            savedReports={savedReportsPM}
+            compareReport={compareReportPM}
+            onCompareChange={setCompareReportPM}
+            onDelete={deleteProjReport}
+          />
           {/* Tabs */}
           <div className="flex gap-0 border-b border-gray-200 overflow-x-auto">
             {tabs.map(t => (
@@ -9469,10 +8749,19 @@ function CashFlowModule({ projects, activeYear }) {
             </span>
           </div>
         </div>
-        <button onClick={() => setRefreshKey(k=>k+1)}
-          className="text-xs px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors">
-          ↻ Actualizar
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => {
+              const l = prompt('Nombre del informe de flujo de caja:');
+              if (l && l.trim()) saveCFSnapshot(l.trim(), new Date().toISOString().slice(0,10));
+            }}
+            className="text-xs px-3 py-1.5 rounded-lg bg-[#1C3460] hover:bg-[#2d4f7f] text-white transition-colors">
+            💾 Guardar informe
+          </button>
+          <button onClick={() => setRefreshKey(k=>k+1)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors">
+            ↻ Actualizar
+          </button>
+        </div>
       </div>
 
       {/* ── Selector de período cerrado ── */}
@@ -9515,6 +8804,14 @@ function CashFlowModule({ projects, activeYear }) {
 
       {/* Controles manuales globales + tabla completa — solo en modo actual */}
       {periodoVistoFC === 'actual' && (<>
+      {/* ── Comparación (solo en modo actual) ── */}
+      <ReportSnapshotBar
+        year={year}
+        savedReports={savedReportsCF}
+        compareReport={compareReportCF}
+        onCompareChange={setCompareReportCF}
+        onDelete={deleteCFReport}
+      />
       {/* Controles manuales globales */}
       <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 flex flex-wrap items-center gap-x-5 gap-y-3">
         <div className="flex items-center gap-2">
