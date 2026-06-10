@@ -4367,6 +4367,33 @@ function SnapshotReadonlyBanner({ year, mes }) {
   );
 }
 
+// ── Serializadores de snapshot por módulo ────────────────────────────────────
+// PATRÓN (Fase 3 — snapshots fantasma): cada módulo de SOLO-CÁLCULO (sin estado
+// vivo persistido propio) expone un serializador puro que captura EXACTAMENTE lo
+// que renderiza hoy. El módulo persiste ese objeto de forma continua en su clave
+// `budget-control:{modulo}-snapshot:{year}` vía un useEffect (igual que
+// Proyecciones persiste proj-snapshot). Al cerrar el mes, buildGlobalSnapshot
+// copia esa clave a `modulos.{modulo}` del cierre, congelándola. El módulo lee el
+// congelado con getCierreModulo(year, mes, modulo) cuando el período visto no es
+// 'actual'. Replicar este mismo trío (serializar → persistir vivo → leer del
+// cierre) para scenarios/check/scorecard/obras.
+//
+// Dashboard: congela KPIs, datos de gráficos, análisis EBITDA, resumen,
+// cronograma y el controlMonth del cierre. controlMonth se guarda explícito para
+// que la vista de lectura muestre el mes de corte de ESE cierre, no el actual.
+function buildDashboardSnapshot({ year, controlMonth, kpis, chartData, summaryRows, ebitdaAnalysis, projectTimeline }) {
+  return {
+    year,
+    controlMonth,
+    kpis,
+    chartData,
+    summaryRows,
+    ebitdaAnalysis,
+    projectTimeline,
+    ts: Date.now(),
+  };
+}
+
 // ── buildGlobalSnapshot: captura el estado completo de todos los módulos ──────
 function buildGlobalSnapshot(year, controlMonth) {
   return {
@@ -7536,9 +7563,22 @@ function ReportModule({ projects, activeYear }) {
     reportSnap.totales.margenPctProy = ki2.fyProy !== 0 ? ke2.fyProy / ki2.fyProy * 100 : null;
     reportSnap.totales.margenPctPpto = ki2.fyPpto !== 0 ? ke2.fyPpto / ki2.fyPpto * 100 : null;
 
-    // Snapshot global
+    // Snapshot global. buildGlobalSnapshot congela cada módulo leyendo su clave
+    // viva `budget-control:{modulo}-snapshot:{year}` (el Dashboard la persiste vía
+    // useEffect al renderizar). Si la pestaña del Dashboard nunca se abrió para
+    // este año, esa clave no existe y modulos.dashboard quedaría null: la vista de
+    // período cerrado mostraría "sin datos guardados". Avisamos antes de congelar
+    // para que el usuario pueda abrir el Dashboard y reintentar (no bloqueante).
     const snap = buildGlobalSnapshot(year, controlMonth);
     snap.modulos.report = reportSnap;
+    if (!snap.modulos.dashboard) {
+      if (!window.confirm(
+        `El Dashboard aún no tiene datos congelados para ${year}.\n\n` +
+        `Si cierras ahora, al consultar este período cerrado el Dashboard mostrará ` +
+        `"sin datos guardados". Para congelarlo, abre primero la pestaña Dashboard ` +
+        `(que recalcula y guarda su snapshot) y vuelve a cerrar.\n\n` +
+        `¿Cerrar de todos modos sin el snapshot del Dashboard?`)) return;
+    }
     if (!storage.set(cierreKey(year, controlMonth), snap)) {
       reportCriticalSaveFailure(`cierre de ${MONTH_ABR[controlMonth-1]} ${year}`);
       return; // no seguir como si el cierre se hubiera guardado
@@ -9771,26 +9811,61 @@ function DashboardModule({ projects, activeYear }) {
 
   const noData = controlMonth === 0 && !projSnapshot;
 
+  // ── Persistencia viva del snapshot del Dashboard ────────────────────────────
+  // Mantiene `budget-control:dashboard-snapshot:{year}` al día con lo que se
+  // renderiza ahora. buildGlobalSnapshot lo copia al cierre (modulos.dashboard),
+  // congelándolo. No escribimos snapshots vacíos para no pisar uno significativo
+  // previo. (Mismo patrón que el useEffect que persiste proj-snapshot.)
+  React.useEffect(() => {
+    if (noData) return;
+    try {
+      storage.set(`budget-control:dashboard-snapshot:${year}`,
+        buildDashboardSnapshot({ year, controlMonth, kpis, chartData, summaryRows, ebitdaAnalysis, projectTimeline }));
+    } catch {}
+  }, [year, controlMonth, kpis, chartData, summaryRows, ebitdaAnalysis, projectTimeline, noData]);
+
+  // ── Resolución de fuente: vivo (actual) vs congelado (período cerrado) ───────
+  // En período cerrado leemos EXACTAMENTE lo que se congeló al cerrar ese mes
+  // (getCierreModulo → modulos.dashboard). El cuerpo del render usa estas
+  // variables `view*`, de modo que un mismo JSX sirve para ambos modos.
+  const isClosedView = periodoVistoDB !== 'actual';
+  const frozen = isClosedView ? getCierreModulo(year, periodoVistoDB, 'dashboard') : null;
+  // Cierres anteriores a Fase 3 no tienen dashboard congelado → frozen === null
+  // y mostramos "sin datos guardados" en vez de datos vivos.
+  const frozenMissing = isClosedView && !frozen;
+  const viewKpis           = isClosedView ? (frozen?.kpis           || {})  : kpis;
+  const viewChartData      = isClosedView ? (frozen?.chartData      || [])  : chartData;
+  const viewSummaryRows    = isClosedView ? (frozen?.summaryRows    || [])  : summaryRows;
+  const viewEbitdaAnalysis = isClosedView ? (frozen?.ebitdaAnalysis || { hasData: false }) : ebitdaAnalysis;
+  const viewTimeline       = isClosedView ? (frozen?.projectTimeline || []) : projectTimeline;
+  const viewControlMonth   = isClosedView ? (frozen?.controlMonth ?? periodoVistoDB) : controlMonth;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-base font-bold text-gray-800 uppercase tracking-wide">Dashboard Ejecutivo {year}</h1>
           <p className="text-[11px] text-gray-500 mt-0.5">
-            {controlMonth > 0
-              ? `Datos reales hasta ${MONTH_ABR[controlMonth-1]} ${year} · Proyección hasta Dic ${year}`
-              : projSnapshot ? `Sin datos reales · Proyección guardada`
-              : `Sin datos para ${year}`}
+            {isClosedView
+              ? (frozenMissing
+                  ? `Período cerrado ${MONTH_ABR[periodoVistoDB-1]} ${year} · sin snapshot`
+                  : `Congelado al cierre · datos reales hasta ${MONTH_ABR[viewControlMonth-1]} ${year}`)
+              : controlMonth > 0
+                ? `Datos reales hasta ${MONTH_ABR[controlMonth-1]} ${year} · Proyección hasta Dic ${year}`
+                : projSnapshot ? `Sin datos reales · Proyección guardada`
+                : `Sin datos para ${year}`}
           </p>
         </div>
-        <button onClick={() => setRefreshKey(k => k+1)}
-          className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
-          ↻ Actualizar
-        </button>
+        {!isClosedView && (
+          <button onClick={() => setRefreshKey(k => k+1)}
+            className="text-[11px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+            ↻ Actualizar
+          </button>
+        )}
       </div>
 
       <PeriodSelectorBar year={year} periodoVisto={periodoVistoDB} onChange={setPeriodoVistoDB} />
-      {periodoVistoDB !== 'actual' && <SnapshotReadonlyBanner year={year} mes={periodoVistoDB} />}
+      {isClosedView && <SnapshotReadonlyBanner year={year} mes={periodoVistoDB} />}
 
       {noData && periodoVistoDB === 'actual' && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700">
@@ -9798,13 +9873,23 @@ function DashboardModule({ projects, activeYear }) {
         </div>
       )}
 
+      {frozenMissing && (
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm">
+          No hay datos de dashboard guardados para {MONTH_ABR[periodoVistoDB-1]} {year}.
+          <div className="text-[11px] mt-1 text-gray-400">
+            Este informe se cerró antes de que el Dashboard congelara sus datos. Volvé a cerrar el mes desde Reporte Manager para guardarlos.
+          </div>
+        </div>
+      )}
+
+      {!frozenMissing && (<>
       <div className="grid grid-cols-5 gap-3">
         {[
-          { label: 'EBITDA Proyectado FY', value: fN(kpis.ebitdaFY) + ' UF',  color: kpis.ebitdaFY >= 0 ? 'text-emerald-600' : 'text-red-600', sub: 'Full Year ' + year },
-          { label: 'Margen EBITDA',        value: fPct(kpis.margenOp),          color: (kpis.margenOp ?? 0) >= 0 ? 'text-blue-600' : 'text-red-600', sub: 'sobre Ingresos FY' },
-          { label: 'Δ vs Presupuesto',     value: fN(kpis.desvVsPpto) + ' UF', color: kpis.desvVsPpto >= 0 ? 'text-emerald-600' : 'text-amber-600', sub: 'EBITDA FY vs Ppto' },
-          { label: 'Caja Proyectada',      value: kpis.cajaFinAnio == null ? '—' : fN(kpis.cajaFinAnio) + ' UF', color: kpis.cajaFinAnio == null ? 'text-gray-400' : (kpis.cajaFinAnio >= 0 ? 'text-blue-600' : 'text-red-600'), sub: kpis.cajaFinAnio == null ? 'Abrí Flujo de Caja' : `Dic ${year}` },
-          { label: 'Mes Control',          value: controlMonth > 0 ? `${MONTH_ABR[controlMonth-1]} ${year}` : 'Sin datos', color: 'text-gray-700', sub: 'último real cargado' },
+          { label: 'EBITDA Proyectado FY', value: fN(viewKpis.ebitdaFY) + ' UF',  color: viewKpis.ebitdaFY >= 0 ? 'text-emerald-600' : 'text-red-600', sub: 'Full Year ' + year },
+          { label: 'Margen EBITDA',        value: fPct(viewKpis.margenOp),          color: (viewKpis.margenOp ?? 0) >= 0 ? 'text-blue-600' : 'text-red-600', sub: 'sobre Ingresos FY' },
+          { label: 'Δ vs Presupuesto',     value: fN(viewKpis.desvVsPpto) + ' UF', color: viewKpis.desvVsPpto >= 0 ? 'text-emerald-600' : 'text-amber-600', sub: 'EBITDA FY vs Ppto' },
+          { label: 'Caja Proyectada',      value: viewKpis.cajaFinAnio == null ? '—' : fN(viewKpis.cajaFinAnio) + ' UF', color: viewKpis.cajaFinAnio == null ? 'text-gray-400' : (viewKpis.cajaFinAnio >= 0 ? 'text-blue-600' : 'text-red-600'), sub: viewKpis.cajaFinAnio == null ? 'Abrí Flujo de Caja' : `Dic ${year}` },
+          { label: 'Mes Control',          value: viewControlMonth > 0 ? `${MONTH_ABR[viewControlMonth-1]} ${year}` : 'Sin datos', color: 'text-gray-700', sub: 'último real cargado' },
         ].map((k, i) => (
           <div key={i} className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{k.label}</p>
@@ -9817,17 +9902,17 @@ function DashboardModule({ projects, activeYear }) {
       <div className="grid grid-cols-2 gap-4">
         <div className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
           <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">EBITDA Acumulado — Real vs Ppto vs Proyectado</h3>
-          <SvgCompareLines data={chartData} />
+          <SvgCompareLines data={viewChartData} />
         </div>
         <div className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
           <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">Caja Acumulada Proyectada</h3>
-          <SvgLineChart data={chartData} />
+          <SvgLineChart data={viewChartData} />
         </div>
       </div>
 
       {/* Análisis EBITDA — lectura para directorio */}
-      {ebitdaAnalysis.hasData && (() => {
-        const a = ebitdaAnalysis;
+      {viewEbitdaAnalysis.hasData && (() => {
+        const a = viewEbitdaAnalysis;
         const fmt = v => (Math.round(v * 10) / 10).toLocaleString('es-CL', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
         const fav = a.totalVar >= 0;
         return (
@@ -9890,7 +9975,7 @@ function DashboardModule({ projects, activeYear }) {
               </tr>
             </thead>
             <tbody>
-              {summaryRows.map((row, i) => (
+              {viewSummaryRows.map((row, i) => (
                 <tr key={i} className={`border-t border-gray-50 ${row.hi ? 'bg-emerald-50' : row.bold ? 'bg-gray-50/60' : 'hover:bg-gray-50'}`}>
                   <td className={`px-4 py-2 ${row.bold ? 'font-semibold text-gray-700' : 'text-gray-500'}`}>{row.label}</td>
                   <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${row.bold?'font-semibold':''} ${row.ytd < -0.005 ? 'text-red-600' : 'text-gray-700'}`}>{fN(row.ytd)}</td>
@@ -9906,7 +9991,7 @@ function DashboardModule({ projects, activeYear }) {
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
             <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Cronograma {year}</h3>
-            {projectTimeline.some(p => p.avance != null) && (
+            {viewTimeline.some(p => p.avance != null) && (
               <span className="flex items-center gap-1.5 text-[9px] text-gray-400">
                 <span style={{ width: 14, height: 8, background: 'rgba(239,68,68,0.40)', borderRight: '2px solid rgba(220,38,38,0.85)', display: 'inline-block', borderRadius: 2 }} />
                 Avance físico real (curva S)
@@ -9919,9 +10004,9 @@ function DashboardModule({ projects, activeYear }) {
                 <div key={i} style={{width:`${100/12}%`}} className="text-center text-[9px] text-gray-400">{lbl}</div>
               ))}
             </div>
-            {projectTimeline.length === 0 ? (
+            {viewTimeline.length === 0 ? (
               <p className="text-xs text-gray-400 text-center py-4">Sin proyectos activos</p>
-            ) : projectTimeline.map(p => (
+            ) : viewTimeline.map(p => (
               <div key={p.id} className="flex items-center gap-1">
                 <div className="w-16 text-[9px] text-gray-600 truncate flex-shrink-0" title={p.name}>{p.name}</div>
                 <div className="flex-1 h-5 relative bg-gray-100 rounded overflow-hidden">
@@ -9954,6 +10039,7 @@ function DashboardModule({ projects, activeYear }) {
           </div>
         </div>
       </div>
+      </>)}
     </div>
   );
 }
