@@ -993,23 +993,72 @@ function ProjectForm({ project, projects, onSave, onCancel }) {
     setForm(prev => ({ ...prev, contractType: type, contract: def }));
   }
 
+  // unCode es la CLAVE DE JOIN con ICEMM (unidadNegocioCodigo del Reporte Manager).
+  // Debe ser único y normalizarse al formato canónico de 2 dígitos con cero a la izquierda.
+  const normUnCode = v => String(v ?? '').trim().padStart(2, '0');
+  // Saneo de montos: fuerza número finito >= 0 (descarta negativos y NaN).
+  const sanitizeMonto = v => {
+    const n = +v;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  // Campos monetarios del contrato a sanear (según el tipo); los % de anticipo/retención
+  // ya tienen min en el input y no se tocan acá.
+  const CONTRACT_MONEY_FIELDS = [
+    'costDirectoGG', 'gastoGeneralOC', 'utilidadEstudiada', 'provisionPostVenta',
+    'totalBudgetedCost', 'monthlyGG', 'monthlyFee', 'cashAdvance', 'honorarioAdmin', 'fondoCaja',
+  ];
+
   function handleSubmit(e) {
     e.preventDefault();
+
+    // ── Validación unCode (clave de join con ICEMM): único y normalizado ──────────
+    const canonicalUn = normUnCode(form.unCode);
+    const collision = projects.some(p =>
+      p.id !== form.id && normUnCode(p.unCode) === canonicalUn
+    );
+    if (collision) {
+      alert(`El código de Unidad de Negocio "${canonicalUn}" ya está en uso por otro proyecto. Debe ser único (es la clave de cruce con ICEMM).`);
+      return;
+    }
+
+    // ── Validación de fechas: fin no puede ser anterior al inicio ─────────────────
+    if (form.startDate && form.endDate && form.endDate < form.startDate) {
+      alert('La fecha de término no puede ser anterior a la fecha de inicio.');
+      return;
+    }
+
     if (form.durationMonths > 0) {
       const sc = form.costCurve.reduce((a, b) => a + (+b || 0), 0);
       const sr = form.revenueCurve.reduce((a, b) => a + (+b || 0), 0);
       if (Math.abs(sc - 100) > 0.1) { alert('La curva de costo debe sumar 100%'); return; }
       if (Math.abs(sr - 100) > 0.1) { alert('La curva de facturación debe sumar 100%'); return; }
     }
-    let savedForm = form;
-    if (form.contractType === 'suma_alzada') {
-      const total = (+form.contract.costDirectoGG || 0) + (+form.contract.gastoGeneralOC || 0)
-        + (+form.contract.utilidadEstudiada || 0) + (+form.contract.provisionPostVenta || 0);
-      savedForm = { ...form, contract: { ...form.contract, originalAmount: total } };
+
+    // ── Saneo de montos negativos/NaN en contrato y presupuesto por categoría ─────
+    const cleanContract = { ...form.contract };
+    CONTRACT_MONEY_FIELDS.forEach(f => {
+      if (cleanContract[f] !== undefined && cleanContract[f] !== '' && cleanContract[f] !== null) {
+        cleanContract[f] = sanitizeMonto(cleanContract[f]);
+      }
+    });
+    const cleanBudget = { ...form.budgetByCategory };
+    Object.keys(cleanBudget).forEach(k => {
+      if (cleanBudget[k] !== '' && cleanBudget[k] !== undefined && cleanBudget[k] !== null) {
+        cleanBudget[k] = sanitizeMonto(cleanBudget[k]);
+      }
+    });
+
+    const base = { ...form, unCode: canonicalUn, contract: cleanContract, budgetByCategory: cleanBudget };
+
+    let savedForm = base;
+    if (base.contractType === 'suma_alzada') {
+      const total = (+base.contract.costDirectoGG || 0) + (+base.contract.gastoGeneralOC || 0)
+        + (+base.contract.utilidadEstudiada || 0) + (+base.contract.provisionPostVenta || 0);
+      savedForm = { ...base, contract: { ...base.contract, originalAmount: total } };
     } else {
-      const total = (+form.contract.costDirectoGG || 0) + (+form.contract.gastoGeneralOC || 0)
-        + (+form.contract.honorarioAdmin || 0) + (+form.contract.fondoCaja || 0);
-      savedForm = { ...form, contract: { ...form.contract, originalAmount: total } };
+      const total = (+base.contract.costDirectoGG || 0) + (+base.contract.gastoGeneralOC || 0)
+        + (+base.contract.honorarioAdmin || 0) + (+base.contract.fondoCaja || 0);
+      savedForm = { ...base, contract: { ...base.contract, originalAmount: total } };
     }
     onSave(savedForm);
   }
@@ -1347,10 +1396,24 @@ function ProjectManager({ projects, setProjects }) {
   function closeForm() { setShowForm(false);  setEditTarget(null); }
 
   function handleSave(proj) {
+    // Guarda de persistencia (defensa en profundidad respecto a ProjectForm.handleSubmit).
+    // unCode es la CLAVE DE JOIN con ICEMM (unidadNegocioCodigo): normalizar y exigir unicidad.
+    const normUnCode = v => String(v ?? '').trim().padStart(2, '0');
+    const canonicalUn = normUnCode(proj.unCode);
+    const collision = projects.some(p => p.id !== proj.id && normUnCode(p.unCode) === canonicalUn);
+    if (collision) {
+      alert(`El código de Unidad de Negocio "${canonicalUn}" ya está en uso por otro proyecto. Debe ser único (clave de cruce con ICEMM).`);
+      return;
+    }
+    if (proj.startDate && proj.endDate && proj.endDate < proj.startDate) {
+      alert('La fecha de término no puede ser anterior a la fecha de inicio.');
+      return;
+    }
+    const safeProj = { ...proj, unCode: canonicalUn };
     setProjects(prev =>
-      prev.find(p => p.id === proj.id)
-        ? prev.map(p => p.id === proj.id ? proj : p)
-        : [...prev, proj]
+      prev.find(p => p.id === safeProj.id)
+        ? prev.map(p => p.id === safeProj.id ? safeProj : p)
+        : [...prev, safeProj]
     );
     closeForm();
   }
@@ -4253,24 +4316,9 @@ function ProjectionModule({ projects, activeYear }) {
   React.useEffect(() => {
     let ov;
     try { ov = storage.get(`budget-control:overrides:${year}`) || {}; } catch { ov = {}; }
-    // Migración: poblar anticipos 2026 buscando proyectos por unCode (no por ID hardcodeado)
-    if (year === 2026) {
-      const allProj = storage.get('budget-control:projects') || makeSampleProjects();
-      const findId = uc => allProj.find(p => p.unCode === uc)?.id;
-      const idLQ = findId('02');
-      const antOk = idLQ && ov.anticipos?.[idLQ] &&
-        Object.values(ov.anticipos[idLQ]).some(v => +v !== 0);
-      if (!antOk) {
-        const idOC = findId('03');
-        const idAP = findId('04');
-        const newAnt = { ...(ov.anticipos || {}) };
-        if (idLQ) newAnt[idLQ] = { 1: 14270, 2: 14270, 3: 0 };
-        if (idOC) newAnt[idOC] = { 6: 1500 };
-        if (idAP) newAnt[idAP] = { 10: 24152, 11: 24152 };
-        ov = { ...ov, anticipos: newAnt };
-        try { storage.set(`budget-control:overrides:${year}`, ov); } catch {}
-      }
-    }
+    // Anticipos: NO se siembran valores demo. overrides.anticipos arranca vacío y se puebla
+    // únicamente con lo que el usuario ingrese manualmente (que ya quedó persistido en storage).
+    // Se respeta cualquier anticipo editado previamente porque solo se lee, no se sobreescribe.
     setOverrides(ov);
     try { setProjCompletion(storage.get(`budget-control:proj-completion:${year}`) || {}); } catch { setProjCompletion({}); }
     try { setSavedReportsPM(storage.get(`budget-control:saved-reports:${year}`) || []); } catch { setSavedReportsPM([]); }
@@ -8096,25 +8144,9 @@ function CashFlowModule({ projects, activeYear }) {
     }
     setCfData(d);
 
-    // Migración anticipos: busca proyectos por unCode para no depender de IDs hardcodeados
-    if (year === 2026) {
-      const ov = storage.get(`budget-control:overrides:${year}`) || {};
-      const allProj = storage.get('budget-control:projects') || makeSampleProjects();
-      const findId = uc => allProj.find(p => p.unCode === uc)?.id;
-      const idLQ = findId('02');  // La Quebrada (UN02)
-      const idOC = findId('03');  // Olá Costanera (UN03)
-      const idAP = findId('04');  // Agua del Palo (UN04)
-      const antOk = idLQ && ov.anticipos?.[idLQ] &&
-        Object.values(ov.anticipos[idLQ]).some(v => +v !== 0);
-      if (!antOk) {
-        const newAnt = { ...(ov.anticipos || {}) };
-        if (idLQ) newAnt[idLQ] = { 1: 14270, 2: 14270, 3: 0 };  // La Quebrada (mar=0 hasta confirmar)
-        if (idOC) newAnt[idOC] = { 6: 1500 };                    // Olá Costanera
-        if (idAP) newAnt[idAP] = { 10: 24152, 11: 24152 };       // Agua del Palo
-        storage.set(`budget-control:overrides:${year}`, { ...ov, anticipos: newAnt });
-        setRefreshKey(k => k + 1);  // Fuerza re-lectura de overrides
-      }
-    }
+    // Anticipos: NO se siembran valores demo. Los anticipos provienen exclusivamente de lo que
+    // el usuario haya ingresado manualmente (persistido en budget-control:overrides:{year}) o de
+    // datos reales. No se inyectan montos hardcodeados, por lo que cualquier edición previa se respeta.
 
     try { setSavedReportsCF(storage.get(`budget-control:saved-reports:${year}`) || []); } catch { setSavedReportsCF([]); }
     setCompareReportCF(null);
@@ -8462,7 +8494,9 @@ function CashFlowModule({ projects, activeYear }) {
       const totalInv     = aportes + devoluciones;
       // FC del Mes: ivaCredito es egreso real de caja (IVA pagado a proveedores)
       const fcMes = row.totalIngresos + row.totalEgresos + ivaCredito + totalTributos + totalCxPCxC + totalInv;
-      rows[m] = { ...row, ivaCredito, ivaNeto, ppm, impRenta, totalTributos, cxp, cxc, cxcDefault, aportes, devoluciones, totalCxPCxC, totalInv, fcMes };
+      // saldoContador = saldo neto IVA al cierre del mes (negativo=crédito a favor, positivo=deuda al SII).
+      // Se guarda en la fila para poder arrastrar el saldo de diciembre al año siguiente (ver effect de persistencia).
+      rows[m] = { ...row, ivaCredito, ivaNeto, ppm, impRenta, totalTributos, cxp, cxc, cxcDefault, aportes, devoluciones, totalCxPCxC, totalInv, fcMes, saldoContador };
       saldoIVAPrev = saldoContador;
     }
     // Pass 3: caja acumulada (parte desde la caja inicial efectiva: manual / Balance / año anterior)
@@ -8484,10 +8518,14 @@ function CashFlowModule({ projects, activeYear }) {
     const cajaMensual = Object.fromEntries(
       Object.entries(cfRows).map(([m, r]) => [m, r.cajaFinal])
     );
+    // Saldo neto IVA al cierre de diciembre. Convención de signo (igual que saldoIVADicAnterior):
+    // negativo = crédito a favor (excedente que se arrastra), positivo = deuda al SII.
+    // Se persiste para que "Crear Año Siguiente" lo use como saldoIVADicAnterior del año entrante.
+    const saldoIVADicFinal = dec?.saldoContador || 0;
     const prev = storage.get(`budget-control:cashflow:${year}`) || {};
-    if (prev.cajaFinalDic !== dec?.cajaFinal) {
+    if (prev.cajaFinalDic !== dec?.cajaFinal || prev.saldoIVADicFinal !== saldoIVADicFinal) {
       storage.set(`budget-control:cashflow:${year}`, {
-        ...prev, cajaFinalDic: dec?.cajaFinal || 0, cajaMensual
+        ...prev, cajaFinalDic: dec?.cajaFinal || 0, cajaMensual, saldoIVADicFinal
       });
     }
   }, [cfRows, year]);
@@ -11555,10 +11593,6 @@ function ControlCostosModule({ projects, activeYear }) {
   // Vista por defecto = la app ICEMM embebida (conserva su propia carga de archivos
   // Excel: parseItemizado/parseRealERP → backend → Postgres). 'resumen' = vista del tablero.
   const [tab, setTab] = useState('app');
-  // Auto-cambiar a resumen si hay datos; si no, mostrar app ICEMM.
-  useEffect(() => {
-    setTab(controlMonth > 0 ? 'resumen' : 'app');
-  }, [controlMonth]);
 
   // Mismo patrón de acceso a datos que ProjectionModule/CashFlowModule.
   const controlMonth = useMemo(() => {
@@ -11567,6 +11601,11 @@ function ControlCostosModule({ projects, activeYear }) {
     }
     return 0;
   }, [year]);
+  // Auto-cambiar a resumen si hay datos; si no, mostrar app ICEMM. (Debe ir DESPUÉS de
+  // declarar controlMonth: el array de deps se evalúa en render, antes habría TDZ.)
+  useEffect(() => {
+    setTab(controlMonth > 0 ? 'resumen' : 'app');
+  }, [controlMonth]);
   const actualsForYear = useMemo(() => {
     const r = {};
     for (let m = 1; m <= 12; m++) {
@@ -11883,10 +11922,15 @@ function App() {
     }
     const cfCurrent = storage.get(`budget-control:cashflow:${activeYear}`) || {};
     const cajaInicialEnero = cfCurrent.cajaFinalDic || 0;
+    // Arrastre del saldo neto de IVA: el saldo de diciembre del año en curso pasa a ser el
+    // saldo inicial del año siguiente. Convención de signo: negativo = crédito a favor, positivo = deuda.
+    // Campo opcional (default 0) → backward-compatible con cashflows guardados que no lo tengan.
+    const saldoIVADicAnterior = cfCurrent.saldoIVADicFinal || 0;
     const existingCF = storage.get(`budget-control:cashflow:${nextYear}`);
     if (!existingCF) {
       storage.set(`budget-control:cashflow:${nextYear}`, {
         cajaInicialEnero,
+        saldoIVADicAnterior,
         cxp: Object.fromEntries(Array.from({length:12},(_,i)=>[i+1,0])),
         cxc: Object.fromEntries(Array.from({length:12},(_,i)=>[i+1,0])),
         aportes: Object.fromEntries(Array.from({length:12},(_,i)=>[i+1,0])),

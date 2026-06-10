@@ -15,6 +15,8 @@ import {
   ppm,
   fcMes,
   cajaFinal,
+  saldoIVADicFinal,
+  arrastrarSaldoIVA,
 } from './flujocaja.js';
 
 describe('ivaDebito', () => {
@@ -265,6 +267,94 @@ describe('cadena secuencial de meses (arrastre IVA + caja)', () => {
       prevCajaFin = cajaFin;
       cajaAnt = cajaFin;
     }
+  });
+});
+
+// ── Arrastre del saldo IVA entre años (cruce de año) ────────────────────────────
+// Golden master del fix de createNextYear: el saldo neto IVA de diciembre del año en
+// curso debe pasar a ser el saldoIVADicAnterior del año siguiente.
+// Convención de signo: negativo = crédito a favor, positivo = deuda al SII.
+describe('arrastre del saldo IVA entre años', () => {
+  describe('saldoIVADicFinal (extrae el saldoContador de diciembre)', () => {
+    it('devuelve el saldoContador del mes 12', () => {
+      const saldosPorMes = { 11: 50.5, 12: -123.45 };
+      expect(saldoIVADicFinal(saldosPorMes)).toBeCloseTo(-123.45, 6);
+    });
+
+    it('borde: año incompleto sin diciembre → 0 (default backward-compatible)', () => {
+      expect(saldoIVADicFinal({ 1: -10, 2: -20 })).toBe(0);
+    });
+
+    it('borde: entrada nula/undefined → 0', () => {
+      expect(saldoIVADicFinal(null)).toBe(0);
+      expect(saldoIVADicFinal(undefined)).toBe(0);
+    });
+
+    it('soporta arreglo indexado por mes (1..12)', () => {
+      const arr = [];
+      arr[12] = 217.645;
+      expect(saldoIVADicFinal(arr)).toBeCloseTo(217.645, 6);
+    });
+  });
+
+  describe('arrastrarSaldoIVA (propaga dic → enero del año siguiente)', () => {
+    it('diciembre cierra con CRÉDITO (negativo) → enero arranca con ese crédito', () => {
+      // Dic cierra con saldo -84 (crédito a favor) → próximo enero parte con saldoIVADicAnterior=-84.
+      const saldoDic = -84;
+      const saldoEneroSiguiente = arrastrarSaldoIVA(saldoDic);
+      expect(saldoEneroSiguiente).toBe(-84);
+      // y como es <=0, en enero del año entrante no se paga IVA (ivaNetoMes).
+      expect(ivaNetoMes(saldoEneroSiguiente)).toBe(0);
+    });
+
+    it('diciembre cierra con DEUDA (positivo) → enero arranca con esa deuda', () => {
+      // Dic cierra con saldo +217.645 (deuda) → próximo enero parte con ese saldo positivo.
+      const saldoDic = 217.645;
+      const saldoEneroSiguiente = arrastrarSaldoIVA(saldoDic);
+      expect(saldoEneroSiguiente).toBeCloseTo(217.645, 6);
+      // saldo > 0 → ivaCredAcum reinicia (no arrastra el crédito del mes).
+      expect(ivaCredAcum(saldoEneroSiguiente, -100)).toBeCloseTo(-100, 6);
+      // y el saldo positivo se paga al SII (con 1 mes de rezago) → ivaNetoMes lo refleja.
+      expect(ivaNetoMes(saldoEneroSiguiente)).toBeCloseTo(217.645, 6);
+    });
+
+    it('borde: campo ausente/0 (cashflow viejo sin saldoIVADicFinal) → 0', () => {
+      expect(arrastrarSaldoIVA(undefined)).toBe(0);
+      expect(arrastrarSaldoIVA(0)).toBe(0);
+      expect(arrastrarSaldoIVA(null)).toBe(0);
+    });
+  });
+
+  it('end-to-end: el saldoContador de diciembre del año N es el saldoIVADicAnterior del año N+1', () => {
+    // Año N: 3 meses (proxy de un año) — reusa los datos de la cadena secuencial.
+    const pCostos = 0.77, pOC = 0.05;
+    const mesesAnioN = [
+      { totalIngresosOp: 1000, totalCostos: -800,  oc: -100 },
+      { totalIngresosOp: 1500, totalCostos: -900,  oc: -120 },
+      { totalIngresosOp: 2000, totalCostos: -1100, oc: -150 }, // "diciembre" del proxy
+    ];
+    let saldoIVAPrev = -84; // seed saldoIVADicAnterior del año N
+    const saldosContador = {};
+    for (let i = 0; i < mesesAnioN.length; i++) {
+      const r = mesesAnioN[i];
+      const ivD  = ivaDebito(r.totalIngresosOp);
+      const ivC  = ivaCredito(r.totalCostos, r.oc, pCostos, pOC);
+      const ivAc = ivaCredAcum(saldoIVAPrev, ivC);
+      const sC   = saldoContador(ivAc, ivD);
+      saldosContador[i + 1] = sC;
+      saldoIVAPrev = sC;
+    }
+    // El "diciembre" (mes 3 del proxy) cerró en 217.645 (deuda) — ver cadena secuencial.
+    // En el monolito ese valor se persiste como saldoIVADicFinal; mapeamos al mes 12.
+    const saldosAnioN = { 12: saldosContador[mesesAnioN.length] };
+    const dicFinal = saldoIVADicFinal(saldosAnioN);
+    expect(dicFinal).toBeCloseTo(217.645, 6);
+
+    // Año N+1: createNextYear propaga ese saldo como saldoIVADicAnterior inicial.
+    const saldoIVAInicialAnioSiguiente = arrastrarSaldoIVA(dicFinal);
+    expect(saldoIVAInicialAnioSiguiente).toBeCloseTo(217.645, 6);
+    // Antes del fix, este saldo arrancaba en 0 y descuadraba el Q1 del año siguiente.
+    expect(saldoIVAInicialAnioSiguiente).not.toBe(0);
   });
 });
 

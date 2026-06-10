@@ -84,3 +84,32 @@ export function fcMes(totalIngresos, totalEgresos, ivaCredito, totalTributos, to
 export function cajaFinal(cajaInicial, fcMes) {
   return cajaInicial + fcMes;
 }
+
+// ── Arrastre del saldo IVA entre años ─────────────────────────────────────────────
+// Convención de signo (igual que cfData.saldoIVADicAnterior en el monolito):
+//   negativo = crédito a favor (excedente que se arrastra), positivo = deuda al SII.
+//
+// En el monolito, `saldoIVAPrev` se inicializa con `saldoIVADicAnterior` y, mes a mes,
+// se reasigna al `saldoContador` del mes:
+//   let saldoIVAPrev = +(cfData.saldoIVADicAnterior || 0);
+//   for (m = 1..12) { ...; const saldoContador = ivaCredAcum + ivaDebito; saldoIVAPrev = saldoContador; }
+// Por lo tanto, tras diciembre, `saldoIVAPrev` == saldoContador de diciembre. Ese valor es el
+// "saldo IVA dic final" que debe arrastrarse como saldo inicial del año siguiente.
+
+// Computa el saldo neto IVA de diciembre dada la secuencia mensual de saldoContador.
+// `saldosContadorPorMes` es un objeto/array indexado por mes (1..12) con el saldoContador
+// de cada mes (tal como queda en cfRows[m].saldoContador en el monolito). Si diciembre no
+// existe (año incompleto), retorna 0 (default backward-compatible).
+// Monolito equivalente: el effect persiste `saldoIVADicFinal = cfRows[12]?.saldoContador || 0`.
+export function saldoIVADicFinal(saldosContadorPorMes) {
+  if (saldosContadorPorMes == null) return 0;
+  const dic = saldosContadorPorMes[12];
+  return dic == null ? 0 : +dic;
+}
+
+// Propaga el saldo IVA de diciembre como saldo IVA inicial del año siguiente.
+// Monolito: createNextYear hace `saldoIVADicAnterior = cfCurrent.saldoIVADicFinal || 0`.
+// Campo opcional → default 0 (backward-compatible con cashflows previos sin el campo).
+export function arrastrarSaldoIVA(saldoIVADicFinalAnioActual) {
+  return saldoIVADicFinalAnioActual || 0;
+}
