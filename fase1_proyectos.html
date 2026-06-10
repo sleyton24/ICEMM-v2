@@ -7035,10 +7035,73 @@ function ProjectionModule({ projects, activeYear }) {
       <PeriodSelectorBar year={year} periodoVisto={periodoVistoPM} onChange={setPeriodoVistoPM} />
 
       {/* ── Vista lectura: proyecciones de período cerrado ── */}
+      {/* Espeja TODO lo congelado en proj-snapshot (buildGlobalSnapshot → modulos.projection): */}
+      {/* ingresos, costos por las 8 categorías (PROJ_CATS sin 'no_clasificado'), OC por */}
+      {/* categoría, otros ingresos y anticipos. Backward-compatible: campos ausentes en */}
+      {/* cierres viejos se muestran como "—"/vacío (snap.costos?.[...] ?? {}). Solo lectura. */}
       {periodoVistoPM !== 'actual' && (() => {
         const snap = getCierreModulo(year, periodoVistoPM, 'projection');
+        const MESES = Array.from({length:12},(_,i)=>i+1);
         const fmtN = v => Math.abs(+v||0)<0.005?'—':(+v).toLocaleString('es-CL',{minimumFractionDigits:1,maximumFractionDigits:1});
         const nc = v => Math.abs(+v||0)<0.005?'text-gray-400':(+v)>0?'text-emerald-700':'text-red-600';
+        const ncCost = v => Math.abs(+v||0)<0.005?'text-gray-400':'text-gray-700';
+        const pName = p => projCompletion?.[p.id]?.replacementName || p.name;
+        // Categorías de costo congeladas: las 8 reales (sin 'no_clasificado').
+        const COST_CATS_SNAP = PROJ_CATS.filter(c => c.id !== 'no_clasificado');
+        // Encabezado de meses reutilizable.
+        const monthHead = () => (
+          <tr style={{background:'#1C3460'}}>
+            <th className="text-left px-4 py-2 text-gray-300 font-semibold w-48">{''}</th>
+            {MESES.map(m=>(
+              <th key={m} className="text-right px-2 py-2 text-gray-300 font-semibold">{MONTH_ABR[m-1]}</th>
+            ))}
+            <th className="text-right px-3 py-2 text-gray-200 font-bold border-l border-white/20">Total</th>
+          </tr>
+        );
+        const sectionCard = (title, children, key) => (
+          <div key={key} className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden mb-4">
+            <div className="px-4 py-3 border-b border-gray-100 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
+              {title}
+            </div>
+            <div className="overflow-x-auto">{children}</div>
+          </div>
+        );
+        // Fila genérica: label + 12 meses + total, con coloreo configurable.
+        const dataRow = (key, label, vals, colorFn, sub) => {
+          const tot = vals.reduce((s,v)=>s+(+v||0),0);
+          return (
+            <tr key={key} className="border-b border-gray-100 hover:bg-gray-50">
+              <td className="px-4 py-1.5 font-medium text-gray-700 text-[11px]">
+                {label}{sub && <span className="ml-1 text-[9px] text-gray-400">{sub}</span>}
+              </td>
+              {vals.map((v,i)=>(
+                <td key={i} className={`px-2 py-1.5 text-right font-mono text-[11px] ${colorFn(v)}`}>{fmtN(v)}</td>
+              ))}
+              <td className={`px-3 py-1.5 text-right font-mono text-[11px] font-bold border-l border-gray-200 ${colorFn(tot)}`}>{fmtN(tot)}</td>
+            </tr>
+          );
+        };
+        // Fila total (fondo oscuro).
+        const totalRow = (key, label, vals, colorFn) => {
+          const tot = vals.reduce((s,v)=>s+(+v||0),0);
+          return (
+            <tr key={key} style={{background:'#1C3460'}}>
+              <td className="px-4 py-2 font-bold text-white text-[11px] uppercase tracking-wide">{label}</td>
+              {vals.map((v,i)=>(
+                <td key={i} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${colorFn?colorFn(v):'text-white'}`}>{fmtN(v)}</td>
+              ))}
+              <td className="px-3 py-2 text-right font-mono text-[11px] font-bold text-white border-l border-white/20">{fmtN(tot)}</td>
+            </tr>
+          );
+        };
+
+        // Pre-cálculo: costo total por proyecto (suma de las 8 categorías) por mes.
+        const costoProyMes = p => MESES.map(m =>
+          COST_CATS_SNAP.reduce((s,c)=> s + (+(snap?.costos?.[p.id]?.[c.id]?.[m]) || 0), 0));
+        // OC total por mes (suma de categorías OC).
+        const ocTotalMes = MESES.map(m =>
+          OC_PLAN.reduce((s,{catId})=> s + (+(snap?.oc?.[catId]?.[m]) || 0), 0));
+
         return (
           <>
             <SnapshotReadonlyBanner year={year} mes={periodoVistoPM} />
@@ -7047,38 +7110,85 @@ function ProjectionModule({ projects, activeYear }) {
                 No hay datos de proyecciones guardados para {MONTH_ABR[periodoVistoPM-1]} {year}.
               </div>
             ) : (
-              <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-100 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
-                  Snapshot Proyecciones — {MONTH_ABR[periodoVistoPM-1]} {year}
-                </div>
-                <table className="text-xs w-full">
-                  <thead><tr style={{background:'#1C3460'}}>
-                    <th className="text-left px-4 py-2 text-gray-300 font-semibold w-48">Proyecto</th>
-                    {Array.from({length:12},(_,i)=>i+1).map(m=>(
-                      <th key={m} className="text-right px-2 py-2 text-gray-300 font-semibold">{MONTH_ABR[m-1]}</th>
-                    ))}
-                  </tr></thead>
-                  <tbody>
-                    {activeProjects.map(p => {
-                      const ing = snap.ingresos?.[p.id] || {};
-                      const totalIng = Object.values(ing).reduce((s,v)=>s+(+v||0),0);
-                      return (
-                        <tr key={p.id} className="border-b border-gray-100 hover:bg-gray-50">
-                          <td className="px-4 py-1.5 font-medium text-gray-700 text-[11px]">
-                            {projCompletion?.[p.id]?.replacementName || p.name}
-                            <span className="ml-1 text-[9px] text-gray-400">{p.contractType==='suma_alzada'?'SA':'AD'}</span>
-                          </td>
-                          {Array.from({length:12},(_,i)=>i+1).map(m=>(
-                            <td key={m} className={`px-2 py-1.5 text-right font-mono text-[11px] ${nc(ing[m]||0)}`}>
-                              {fmtN(ing[m]||0)}
-                            </td>
-                          ))}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                {/* ── INGRESOS por proyecto ── */}
+                {sectionCard(`Ingresos proyectados — ${MONTH_ABR[periodoVistoPM-1]} ${year}`, (
+                  <table className="text-xs w-full">
+                    <thead>{monthHead()}</thead>
+                    <tbody>
+                      {activeProjects.map(p => {
+                        const ing = snap.ingresos?.[p.id] || {};
+                        return dataRow(p.id, pName(p), MESES.map(m=>ing[m]||0), nc,
+                          p.contractType==='suma_alzada'?'SA':'AD');
+                      })}
+                      {totalRow('tot-ing', 'Total Ingresos',
+                        MESES.map(m => activeProjects.reduce((s,p)=> s + (+(snap.ingresos?.[p.id]?.[m]) || 0), 0)),
+                        v => Math.abs(+v||0)<0.005?'text-white/40':'text-emerald-300')}
+                    </tbody>
+                  </table>
+                ))}
+
+                {/* ── COSTOS por categoría, detalle por proyecto (8 categorías) ── */}
+                {activeProjects.map(p => (
+                  sectionCard(`Costos proyectados — ${pName(p)}`, (
+                    <table key={p.id} className="text-xs w-full">
+                      <thead>{monthHead()}</thead>
+                      <tbody>
+                        {COST_CATS_SNAP.map(c =>
+                          dataRow(`${p.id}-${c.id}`, c.label,
+                            MESES.map(m => +(snap.costos?.[p.id]?.[c.id]?.[m]) || 0), ncCost)
+                        )}
+                        {totalRow(`${p.id}-totcost`, 'Total Costos', costoProyMes(p),
+                          v => Math.abs(+v||0)<0.005?'text-white/40':'text-amber-200')}
+                      </tbody>
+                    </table>
+                  ), `cost-${p.id}`)
+                ))}
+
+                {/* ── OFICINA CENTRAL por categoría ── */}
+                {sectionCard(`Costos Oficina Central proyectados — ${MONTH_ABR[periodoVistoPM-1]} ${year}`, (
+                  <table className="text-xs w-full">
+                    <thead>{monthHead()}</thead>
+                    <tbody>
+                      {OC_PLAN.map(({catId}) => {
+                        const label = OC_CATS.find(c=>c.id===catId)?.label || catId;
+                        return dataRow(`oc-${catId}`, label,
+                          MESES.map(m => +(snap.oc?.[catId]?.[m]) || 0), ncCost);
+                      })}
+                      {totalRow('tot-oc', 'Total Oficina Central', ocTotalMes,
+                        v => Math.abs(+v||0)<0.005?'text-white/40':'text-amber-200')}
+                    </tbody>
+                  </table>
+                ))}
+
+                {/* ── OTROS INGRESOS (asesorías + intereses) ── */}
+                {sectionCard(`Otros ingresos proyectados — ${MONTH_ABR[periodoVistoPM-1]} ${year}`, (
+                  <table className="text-xs w-full">
+                    <thead>{monthHead()}</thead>
+                    <tbody>
+                      {dataRow('otros-ing', 'Asesorías e intereses',
+                        MESES.map(m => +(snap.otrosIngresos?.[m]) || 0), nc)}
+                    </tbody>
+                  </table>
+                ))}
+
+                {/* ── ANTICIPOS por proyecto ── */}
+                {sectionCard(`Anticipos proyectados — ${MONTH_ABR[periodoVistoPM-1]} ${year}`, (
+                  <table className="text-xs w-full">
+                    <thead>{monthHead()}</thead>
+                    <tbody>
+                      {activeProjects.map(p =>
+                        dataRow(`ant-${p.id}`, pName(p),
+                          MESES.map(m => +(snap.anticipos?.[p.id]?.[m]) || 0), nc,
+                          p.contractType==='suma_alzada'?'SA':'AD')
+                      )}
+                      {totalRow('tot-ant', 'Total Anticipos',
+                        MESES.map(m => activeProjects.reduce((s,p)=> s + (+(snap.anticipos?.[p.id]?.[m]) || 0), 0)),
+                        v => Math.abs(+v||0)<0.005?'text-white/40':'text-emerald-300')}
+                    </tbody>
+                  </table>
+                ))}
+              </>
             )}
           </>
         );
@@ -8854,7 +8964,10 @@ function CashFlowModule({ projects, activeYear }) {
     const prev = storage.get(`budget-control:cashflow:${year}`) || {};
     if (prev.cajaFinalDic !== dec?.cajaFinal || prev.saldoIVADicFinal !== saldoIVADicFinal) {
       storage.set(`budget-control:cashflow:${year}`, {
-        ...prev, cajaFinalDic: dec?.cajaFinal || 0, cajaMensual, saldoIVADicFinal
+        // cajaMensualTs: marca de cuándo Flujo de Caja recalculó y persistió la caja.
+        // El Dashboard la usa para avisar si la Caja Proyectada puede estar desactualizada.
+        ...prev, cajaFinalDic: dec?.cajaFinal || 0, cajaMensual, saldoIVADicFinal,
+        cajaMensualTs: Date.now()
       });
     }
   }, [cfRows, year]);
@@ -9893,6 +10006,27 @@ function DashboardModule({ projects, activeYear }) {
   const viewTimeline       = isClosedView ? (frozen?.projectTimeline || []) : projectTimeline;
   const viewControlMonth   = isClosedView ? (frozen?.controlMonth ?? periodoVistoDB) : controlMonth;
 
+  // ── Frescura de la Caja Proyectada (solo vista viva) ─────────────────────────
+  // La caja SOLO se persiste cuando el módulo Flujo de Caja se monta y recalcula.
+  // Si el usuario cambió presupuesto/proyección y no abrió Flujo de Caja, la cifra
+  // del Dashboard puede estar vieja. cfData.cajaMensualTs (escrito por CashFlowModule
+  // al persistir) marca cuándo se recalculó. Aviso pragmático, no detección perfecta:
+  // mostramos "última actualización" + recordatorio de que se refresca al abrir
+  // Flujo de Caja. Backward-compatible: cashflows viejos sin ts caen al fallback.
+  const cajaSub = useMemo(() => {
+    if (isClosedView) return `Dic ${year}`;            // congelado: fecha del cierre
+    if (viewKpis.cajaFinAnio == null) return 'Abrí Flujo de Caja para calcularla';
+    const ts = cfData?.cajaMensualTs;
+    if (ts) {
+      try {
+        const d = new Date(ts);
+        const fecha = `${String(d.getDate()).padStart(2,'0')}/${MONTH_ABR[d.getMonth()]} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+        return `Dic ${year} · calculada ${fecha} · se actualiza al abrir Flujo de Caja`;
+      } catch { /* ts inválido → fallback */ }
+    }
+    return `Dic ${year} · se actualiza al abrir Flujo de Caja`;
+  }, [isClosedView, year, viewKpis.cajaFinAnio, cfData]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -9941,7 +10075,7 @@ function DashboardModule({ projects, activeYear }) {
           { label: 'EBITDA Proyectado FY', value: fN(viewKpis.ebitdaFY) + ' UF',  color: viewKpis.ebitdaFY >= 0 ? 'text-emerald-600' : 'text-red-600', sub: 'Full Year ' + year },
           { label: 'Margen EBITDA',        value: fPct(viewKpis.margenOp),          color: (viewKpis.margenOp ?? 0) >= 0 ? 'text-blue-600' : 'text-red-600', sub: 'sobre Ingresos FY' },
           { label: 'Δ vs Presupuesto',     value: fN(viewKpis.desvVsPpto) + ' UF', color: viewKpis.desvVsPpto >= 0 ? 'text-emerald-600' : 'text-amber-600', sub: 'EBITDA FY vs Ppto' },
-          { label: 'Caja Proyectada',      value: viewKpis.cajaFinAnio == null ? '—' : fN(viewKpis.cajaFinAnio) + ' UF', color: viewKpis.cajaFinAnio == null ? 'text-gray-400' : (viewKpis.cajaFinAnio >= 0 ? 'text-blue-600' : 'text-red-600'), sub: viewKpis.cajaFinAnio == null ? 'Abrí Flujo de Caja' : `Dic ${year}` },
+          { label: 'Caja Proyectada',      value: viewKpis.cajaFinAnio == null ? '—' : fN(viewKpis.cajaFinAnio) + ' UF', color: viewKpis.cajaFinAnio == null ? 'text-gray-400' : (viewKpis.cajaFinAnio >= 0 ? 'text-blue-600' : 'text-red-600'), sub: cajaSub },
           { label: 'Mes Control',          value: viewControlMonth > 0 ? `${MONTH_ABR[viewControlMonth-1]} ${year}` : 'Sin datos', color: 'text-gray-700', sub: 'último real cargado' },
         ].map((k, i) => (
           <div key={i} className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
