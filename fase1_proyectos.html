@@ -221,6 +221,28 @@ const storage = {
   },
 };
 
+// Lectura del Mayor/Balance POR AÑO. Antes el Mayor/Balance vivían en una clave
+// GLOBAL sin año ('...:latest'), de modo que cargar el de 2027 PISABA al de 2026 y
+// los módulos que veían 2026 leían datos de 2027. Ahora la verdad es la clave
+// keyear 'budget-control:{tipo}:{year}'. Fallback al 'latest' legacy SÓLO si su
+// .year coincide con el año pedido (durante la transición; year y .year son number).
+function getMayorRaw(year) {
+  try {
+    const byYear = storage.get(`budget-control:mayor:${year}`);
+    if (byYear) return byYear;
+    const legacy = storage.get('budget-control:mayor:latest');
+    return (legacy && legacy.year === year) ? legacy : null;
+  } catch { return null; }
+}
+function getBalanceRaw(year) {
+  try {
+    const byYear = storage.get(`budget-control:balance:${year}`);
+    if (byYear) return byYear;
+    const legacy = storage.get('budget-control:balance:latest');
+    return (legacy && legacy.year === year) ? legacy : null;
+  } catch { return null; }
+}
+
 // Aviso bloqueante de una escritura crítica que NO se pudo guardar. Lo usan los
 // setters importantes (cierre de mes, actuals, proyecciones, cashflow, projects):
 // si storage.set devuelve false, paran el flujo "como si hubieran guardado" y
@@ -464,11 +486,11 @@ function pickAndImportData() {
 //               regenerable; en la columna "Fuente de verdad" del catálogo = no).
 //   note      : aclaraciones de mapeo (p.ej. 'latest' sin año → el router inyecta período).
 //
-// NOTA sobre 'latest' (mayor/balance) y lista/ultimo-cierre: estas claves NO mapean 1:1
-// a una ruta con sus propios params. El router (ver dataStore.ApiBackend) inyecta el
-// período activo para mayor/balance:latest → /api/erp-source/{tipo}/{year}/{month}, y
-// deriva lista-cierres/ultimo-cierre de GET /api/cierres/{year}. Se marcan con
-// endpoint:null + derive para señalar "no es una ruta directa, requiere el router".
+// NOTA: mayor/balance YA llevan {year} en la clave (mayor:{year}/balance:{year}) y
+// mapean a /api/erp-source/{tipo}/{year} por sustitución genérica. uf-table y
+// lista/ultimo-cierre SÍ requieren el router: uf-table no lleva año (el router inyecta
+// el período activo) y lista/ultimo-cierre se DERIVAN de GET /api/cierres/{year}. Esas
+// se marcan con endpoint:null + derive para señalar "no es ruta directa".
 const KEY_PREFIX = 'budget-control:';
 
 const KEY_REGISTRY = [
@@ -487,8 +509,8 @@ const KEY_REGISTRY = [
 
   // ── real / ERP ─────────────────────────────────────────────────────────────
   { id: 'actuals',        pattern: 'actuals:{year}:{mm}',   params: ['year', 'mm'],     endpoint: '/api/actuals/{year}/{month}',              source: 'verdad',   note: 'Gasto real itemizado clasificado (rows). {mm}=01..12 → {month}.' },
-  { id: 'mayor-latest',   pattern: 'mayor:latest',          params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "GLOBAL sin año; el router inyecta período → /api/erp-source/mayor/{year}/{month}." },
-  { id: 'balance-latest', pattern: 'balance:latest',        params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "GLOBAL sin año; el router inyecta período → /api/erp-source/balance/{year}/{month}." },
+  { id: 'mayor-latest',   pattern: 'mayor:{year}',          params: ['year'],           endpoint: '/api/erp-source/mayor/{year}',             source: 'verdad',   note: "Mayor EMM keyear por año; el .year del objeto = año cargado (ya no es GLOBAL sin año)." },
+  { id: 'balance-latest', pattern: 'balance:{year}',        params: ['year'],           endpoint: '/api/erp-source/balance/{year}',           source: 'verdad',   note: "Balance contable keyear por año; el .year del objeto = año cargado (ya no es GLOBAL sin año)." },
   { id: 'uf-table',       pattern: 'uf-table',              params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "Tabla UF {[year]:{[month]:{[day]:CLP}}} → /api/erp-source/uf/{year}/{month} (o tabla UFRate)." },
   { id: 'load-history',   pattern: 'load-history',          params: [],                 endpoint: null,                                       source: 'derivado', note: 'Historial de carga ETL; se deriva de loadedAt/loadedBy de actuals/erp-source.' },
 
@@ -571,9 +593,9 @@ function buildKey(id, params) {
 }
 
 // resolveEndpoint(fullKey, ctx): traduce una clave a su ruta REST según el registro.
-// ctx aporta el período activo para las claves GLOBALES 'latest' (mayor/balance/uf)
-// que no llevan año en la clave: ctx = { year, month }. Devuelve { method, path,
-// derive } o null. Es lógica PURA del router; el fetch real lo hace ApiBackend.
+// ctx aporta el período activo para la clave GLOBAL 'uf-table' (que no lleva año en la
+// clave): ctx = { year, month }. mayor/balance ya llevan {year} en la clave. Devuelve
+// { method, path, derive } o null. Es lógica PURA del router; el fetch lo hace ApiBackend.
 function resolveEndpoint(fullKey, ctx) {
   const r = resolveKey(fullKey);
   if (!r) return null;
@@ -586,13 +608,11 @@ function resolveEndpoint(fullKey, ctx) {
     return { method: 'GET', path: '/api/cierres/' + params.year, derive: entry.derive };
   }
   if (entry.derive === 'erp-source') {
-    // mayor/balance/uf 'latest' (sin año): el router inyecta el período activo.
-    const tipo = entry.id === 'mayor-latest' ? 'mayor'
-               : entry.id === 'balance-latest' ? 'balance'
-               : 'uf';
+    // uf-table (sin año en la clave): el router inyecta el período activo.
+    // mayor/balance YA llevan {year} en su clave → caen en la sustitución genérica.
     const y = ctx.year, mo = ctx.month;
     if (y == null || mo == null) return null; // sin período no se puede resolver
-    return { method: 'GET', path: '/api/erp-source/' + tipo + '/' + y + '/' + mo, derive: entry.derive };
+    return { method: 'GET', path: '/api/erp-source/uf/' + y + '/' + mo, derive: entry.derive };
   }
 
   if (!entry.endpoint) return null;
@@ -2960,7 +2980,7 @@ function DataLoader({ projects, activeYear }) {
   const toggleYearMayor   = fy => setExpandedYearsMayor  (prev => { const n = new Set(prev); n.has(fy) ? n.delete(fy) : n.add(fy); return n; });
   const [mayorStage,     setMayorStage]     = useState(() => {
     try {
-      const stored = storage.get('budget-control:mayor:latest');
+      const stored = getMayorRaw(controlYear);
       if (!stored?.rows) return null;
       return {
         rows: stored.rows,
@@ -2975,7 +2995,7 @@ function DataLoader({ projects, activeYear }) {
 
   const [balanceStage,   setBalanceStage]   = useState(() => {
     try {
-      const stored = storage.get('budget-control:balance:latest');
+      const stored = getBalanceRaw(controlYear);
       if (!stored?.accounts) return null;
       return { ...stored, saved: true };
     } catch { return null; }
@@ -3376,11 +3396,15 @@ function DataLoader({ projects, activeYear }) {
 
   function confirmMayorLoad() {
     if (!mayorStage?.rows) return;
-    storage.set('budget-control:mayor:latest', {
+    const mayorObj = {
       rows: mayorStage.rows, loadedAt: new Date().toISOString(),
       filename: mayorStage.filename, ingresos: mayorStage.ingresos,
       year: controlYear, month: controlMonth,
-    });
+    };
+    // Verdad: clave keyear por año. Doble escritura del 'latest' legacy para que
+    // cualquier lector aún no migrado siga viendo el último Mayor cargado.
+    storage.set(`budget-control:mayor:${controlYear}`, mayorObj);
+    storage.set('budget-control:mayor:latest', mayorObj);
     const entry = { type:'mayor', year: controlYear, month: controlMonth,
       filename: mayorStage.filename, loadedAt: new Date().toLocaleString('es-CL'),
       rowCount: mayorStage.rowCount };
@@ -3491,11 +3515,15 @@ function DataLoader({ projects, activeYear }) {
 
   function confirmBalanceLoad() {
     if (!balanceStage?.accounts) return;
-    storage.set('budget-control:balance:latest', {
+    const balanceObj = {
       ...balanceStage,
       loadedAt: new Date().toISOString(),
       year: controlYear, month: controlMonth,
-    });
+    };
+    // Verdad: clave keyear por año. Doble escritura del 'latest' legacy para que
+    // cualquier lector aún no migrado siga viendo el último Balance cargado.
+    storage.set(`budget-control:balance:${controlYear}`, balanceObj);
+    storage.set('budget-control:balance:latest', balanceObj);
     const entry = { type:'balance', year: controlYear, month: controlMonth,
       filename: balanceStage.filename, loadedAt: new Date().toLocaleString('es-CL'),
       rowCount: balanceStage.rowCount };
@@ -4994,10 +5022,10 @@ function ProjectionModule({ projects, activeYear }) {
   // Mayor EMM — datos de ingresos (estructura: { byUN: { UN01: { byAccount: { '5-2-01-002': { byMonthUF, byMonthCLP } } } } })
   const mayorData = useMemo(() => {
     try {
-      const d = storage.get('budget-control:mayor:latest');
+      const d = getMayorRaw(year);
       return (d?.ingresos?.byUN && d?.ingresos?.totalCLP != null) ? d.ingresos : null;
     } catch { return null; }
-  }, [refreshKey]);
+  }, [year, refreshKey]);
 
   // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -6925,10 +6953,10 @@ function ReportModule({ projects, activeYear }) {
 
   const mayorData = useMemo(() => {
     try {
-      const d = storage.get('budget-control:mayor:latest');
+      const d = getMayorRaw(year);
       return (d?.ingresos?.byUN && d?.ingresos?.totalCLP != null) ? d.ingresos : null;
     } catch { return null; }
-  }, [refreshKey]);
+  }, [year, refreshKey]);
 
   // Snapshot guardado por ProjectionModule con los valores proyectados exactos
   const projSnapshot = useMemo(() => {
@@ -8260,7 +8288,7 @@ function CashFlowModule({ projects, activeYear }) {
   }, [year, refreshKey]);
 
   const projSnapshot   = useMemo(() => { try { return storage.get(`budget-control:proj-snapshot:${year}`) || null; } catch { return null; } }, [year, refreshKey]);
-  const mayorData      = useMemo(() => { try { const d = storage.get('budget-control:mayor:latest'); return d?.ingresos?.byUN ? d.ingresos : null; } catch { return null; } }, [refreshKey]);
+  const mayorData      = useMemo(() => { try { const d = getMayorRaw(year); return d?.ingresos?.byUN ? d.ingresos : null; } catch { return null; } }, [year, refreshKey]);
   const ocBudgetByCat  = useMemo(() => { try { return storage.get(`budget-control:budget:${year}`)?.oficinaCentral || {}; } catch { return {}; } }, [year]);
   const otherIncBudget = useMemo(() => { try { return storage.get(`budget-control:budget:${year}`)?.otherIncome || {}; } catch { return {}; } }, [year]);
   const overrides      = useMemo(() => { try { return storage.get(`budget-control:overrides:${year}`) || {}; } catch { return {}; } }, [year, refreshKey]);
@@ -8268,7 +8296,7 @@ function CashFlowModule({ projects, activeYear }) {
   const activeProjects = useMemo(() => projects.filter(p => p.startDate && p.endDate), [projects]);
 
   // ── Caja Inicial del año desde la contabilidad (Balance Contable) ──────────────
-  const balanceData = useMemo(() => { try { return storage.get('budget-control:balance:latest'); } catch { return null; } }, [refreshKey]);
+  const balanceData = useMemo(() => { try { return getBalanceRaw(year); } catch { return null; } }, [year, refreshKey]);
   const ufTableCF   = useMemo(() => { try { return storage.get('budget-control:uf-table') || {}; } catch { return {}; } }, [refreshKey]);
   // Suma de cuentas Caja/Banco/Disponible (CLP) del Balance, convertida a UF al
   // valor de la UF de la fecha del balance. Es la caja con que parte el año.
@@ -9409,10 +9437,10 @@ function DashboardModule({ projects, activeYear }) {
 
   const mayorData = useMemo(() => {
     try {
-      const d = storage.get('budget-control:mayor:latest');
+      const d = getMayorRaw(year);
       return (d?.ingresos?.byUN && d?.ingresos?.totalCLP != null) ? d.ingresos : null;
     } catch { return null; }
-  }, [refreshKey]);
+  }, [year, refreshKey]);
 
   const projSnapshot = useMemo(() => {
     try { return storage.get(`budget-control:proj-snapshot:${year}`) || null; } catch { return null; }
@@ -9923,10 +9951,10 @@ function EscenariosModule({ projects, activeYear }) {
 
   const mayorData = useMemo(() => {
     try {
-      const d = storage.get('budget-control:mayor:latest');
+      const d = getMayorRaw(year);
       return (d?.ingresos?.byUN && d?.ingresos?.totalCLP != null) ? d.ingresos : null;
     } catch { return null; }
-  }, [refreshKey]);
+  }, [year, refreshKey]);
 
   const projSnapshot = useMemo(() => {
     try { return storage.get(`budget-control:proj-snapshot:${year}`) || null; } catch { return null; }
@@ -10170,8 +10198,8 @@ function CheckContableModule({ projects, activeYear }) {
   }, [year, refreshKey]);
 
   const balanceData = useMemo(() => {
-    try { return storage.get('budget-control:balance:latest'); } catch { return null; }
-  }, [refreshKey]);
+    try { return getBalanceRaw(year); } catch { return null; }
+  }, [year, refreshKey]);
 
   const ufTable = useMemo(() => {
     try { return storage.get('budget-control:uf-table') || {}; } catch { return {}; }
