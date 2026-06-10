@@ -444,6 +444,347 @@ function pickAndImportData() {
   input.click();
 }
 
+// ─── KEY_REGISTRY — catálogo declarativo de claves budget-control:* ──────────────
+//
+// ANDAMIAJE PARA POSTGRESQL (NO ACTIVO HOY). Esta tabla es la "única fuente de
+// verdad" de QUÉ claves existen, su forma de patrón, los params que toma cada una y
+// a qué endpoint REST mapearán cuando se conecte el backend (ver CONEXION-POSTGRESQL.md
+// §3 catálogo y §4 endpoints). HOY las claves se descubren por prefijo en runtime
+// (collectAllData); este registro NO cambia ese comportamiento — es DATA + FUNCIONES
+// PURAS sin efecto en runtime salvo que algo lo llame explícitamente. Lo consume el
+// ApiBackend del dataStore de abajo (que por defecto NO se usa, flag en 'local').
+//
+// Campos por entrada:
+//   id        : id lógico estable de la clave (snake/kebab, independiente del patrón).
+//   pattern   : patrón de la clave budget-control:* con placeholders {param} (sin el
+//               prefijo 'budget-control:', que es constante — ver KEY_PREFIX).
+//   params    : nombres de los params que toma el patrón, en orden de aparición.
+//   endpoint  : ruta REST destino con placeholders {param}/{derivados} (CONEXION-PG §4).
+//   source    : 'verdad' (fuente de verdad / autoritativa) | 'derivado' (espejo
+//               regenerable; en la columna "Fuente de verdad" del catálogo = no).
+//   note      : aclaraciones de mapeo (p.ej. 'latest' sin año → el router inyecta período).
+//
+// NOTA sobre 'latest' (mayor/balance) y lista/ultimo-cierre: estas claves NO mapean 1:1
+// a una ruta con sus propios params. El router (ver dataStore.ApiBackend) inyecta el
+// período activo para mayor/balance:latest → /api/erp-source/{tipo}/{year}/{month}, y
+// deriva lista-cierres/ultimo-cierre de GET /api/cierres/{year}. Se marcan con
+// endpoint:null + derive para señalar "no es una ruta directa, requiere el router".
+const KEY_PREFIX = 'budget-control:';
+
+const KEY_REGISTRY = [
+  // ── config / sesión / auth ─────────────────────────────────────────────────
+  { id: 'schema-version', pattern: 'schema-version',        params: [],                 endpoint: '/api/config',                              source: 'verdad',   note: "number; en /api/config como fila key='schema-version'." },
+  { id: 'config',         pattern: 'config',                params: [],                 endpoint: '/api/config',                              source: 'verdad',   note: "{controlYear,controlMonth}; fila key='controlPeriod'." },
+  { id: 'cc-url',         pattern: 'cc-url',                params: [],                 endpoint: '/api/config',                              source: 'verdad',   note: "string URL; fila key='cc-url' (migrar IP HTTP plana → HTTPS)." },
+  { id: 'session',        pattern: 'session',               params: [],                 endpoint: '/api/auth/me',                             source: 'verdad',   note: '{userId}|null → reemplazado por JWT + /api/auth/login.' },
+  { id: 'users',          pattern: 'users',                 params: [],                 endpoint: '/api/users',                               source: 'verdad',   note: 'Array<User>; passHash deja de vivir en cliente.' },
+
+  // ── catálogo / maestro ─────────────────────────────────────────────────────
+  { id: 'projects',       pattern: 'projects',              params: [],                 endpoint: '/api/projects',                            source: 'verdad',   note: 'Array<Project> (8 cats). DTO extendido con ProjectGestion+BudgetByCategory.' },
+
+  // ── presupuesto anual ──────────────────────────────────────────────────────
+  { id: 'budget',         pattern: 'budget:{year}',         params: ['year'],           endpoint: '/api/budget-annual/{year}',                source: 'verdad',   note: 'OC + otros ingresos; status borrador|fijado + snapshot.' },
+
+  // ── real / ERP ─────────────────────────────────────────────────────────────
+  { id: 'actuals',        pattern: 'actuals:{year}:{mm}',   params: ['year', 'mm'],     endpoint: '/api/actuals/{year}/{month}',              source: 'verdad',   note: 'Gasto real itemizado clasificado (rows). {mm}=01..12 → {month}.' },
+  { id: 'mayor-latest',   pattern: 'mayor:latest',          params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "GLOBAL sin año; el router inyecta período → /api/erp-source/mayor/{year}/{month}." },
+  { id: 'balance-latest', pattern: 'balance:latest',        params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "GLOBAL sin año; el router inyecta período → /api/erp-source/balance/{year}/{month}." },
+  { id: 'uf-table',       pattern: 'uf-table',              params: [],                 endpoint: null,                                       source: 'verdad',   derive: 'erp-source', note: "Tabla UF {[year]:{[month]:{[day]:CLP}}} → /api/erp-source/uf/{year}/{month} (o tabla UFRate)." },
+  { id: 'load-history',   pattern: 'load-history',          params: [],                 endpoint: null,                                       source: 'derivado', note: 'Historial de carga ETL; se deriva de loadedAt/loadedBy de actuals/erp-source.' },
+
+  // ── proyección viva ────────────────────────────────────────────────────────
+  { id: 'overrides',        pattern: 'overrides:{year}',        params: ['year'], endpoint: '/api/overrides/{year}',        source: 'verdad',   note: 'Overrides manuales de proyección del año.' },
+  { id: 'proj-completion',  pattern: 'proj-completion:{year}',  params: ['year'], endpoint: '/api/proj-completion/{year}',  source: 'verdad',   note: 'Proyección a término por proyecto-año.' },
+  { id: 'proj-snapshot',    pattern: 'proj-snapshot:{year}',    params: ['year'], endpoint: '/api/proj-snapshot/{year}',    source: 'derivado', note: 'Espejo derivado de proyección (regenerable, isDerived=true).' },
+
+  // ── caja ───────────────────────────────────────────────────────────────────
+  { id: 'cashflow',         pattern: 'cashflow:{year}',         params: ['year'], endpoint: '/api/cashflow/{year}',         source: 'verdad',   note: 'Caja proyectada mensual; arrastre saldoIVA/cajaFinal server-side.' },
+
+  // ── gestión de obra ────────────────────────────────────────────────────────
+  { id: 'control-obras',    pattern: 'control-obras:{year}',    params: ['year'], endpoint: '/api/control-obras/{year}',    source: 'verdad',   note: 'Indicadores de obra (5 áreas) por proyecto-mes.' },
+  { id: 'plazo-curvas',     pattern: 'plazo-curvas:{year}',     params: ['year'], endpoint: '/api/plazo-curvas/{year}',     source: 'verdad',   note: 'Curva S de avance físico programada/controlada.' },
+
+  // ── snapshots vivos de módulo (4) — derivados ──────────────────────────────
+  { id: 'check-snapshot',     pattern: 'check-snapshot:{year}',     params: ['year'], endpoint: '/api/module-snapshot/check/{year}',     source: 'derivado', note: 'Snapshot vivo Check Contable (isDerived=true).' },
+  { id: 'scenarios-snapshot', pattern: 'scenarios-snapshot:{year}', params: ['year'], endpoint: '/api/module-snapshot/scenarios/{year}', source: 'derivado', note: 'Snapshot vivo Escenarios (isDerived=true).' },
+  { id: 'dashboard-snapshot', pattern: 'dashboard-snapshot:{year}', params: ['year'], endpoint: '/api/module-snapshot/dashboard/{year}', source: 'derivado', note: 'Snapshot vivo Dashboard (isDerived=true).' },
+  { id: 'scorecard-snapshot', pattern: 'scorecard-snapshot:{year}', params: ['year'], endpoint: '/api/module-snapshot/scorecard/{year}', source: 'derivado', note: 'Snapshot vivo Scorecard (isDerived=true).' },
+
+  // ── cierre ─────────────────────────────────────────────────────────────────
+  { id: 'cierre',         pattern: 'cierre:{year}:{mm}',    params: ['year', 'mm'], endpoint: '/api/cierres/{year}/{mes}',    source: 'verdad',   note: 'Snapshot global inmutable (7 módulos). POST = transacción atómica de cierre.' },
+  { id: 'lista-cierres',  pattern: 'lista-cierres:{year}',  params: ['year'],       endpoint: null,                           source: 'verdad',   derive: 'cierres-list', note: 'Array<mes>; se DERIVA de GET /api/cierres/{year} (no es clave propia en DB).' },
+  { id: 'ultimo-cierre',  pattern: 'ultimo-cierre:{year}',  params: ['year'],       endpoint: null,                           source: 'verdad',   derive: 'cierres-list', note: 'number; se DERIVA de GET /api/cierres/{year} (max mes).' },
+
+  // ── informes guardados ─────────────────────────────────────────────────────
+  { id: 'saved-reports',  pattern: 'saved-reports:{year}',  params: ['year'],       endpoint: '/api/saved-reports/{year}',    source: 'verdad',   note: 'Array con 3 formas; el backend agrega discriminador tipo explícito.' },
+];
+
+// Índice rápido por id lógico (NO se usa en runtime salvo que algo lo llame).
+const KEY_REGISTRY_BY_ID = KEY_REGISTRY.reduce((acc, e) => { acc[e.id] = e; return acc; }, {});
+
+// Compila un patrón ('actuals:{year}:{mm}') a una RegExp con grupos nombrados por
+// param, anclada y con el prefijo budget-control: ya incluido. Función pura.
+function _compileKeyPattern(pattern) {
+  // Escapar las partes literales del patrón; cada placeholder {param} → grupo nombrado
+  // que captura un segmento sin ':' (los params nunca contienen el separador de clave).
+  let re = '';
+  let last = 0;
+  const rx = /\{(\w+)\}/g;
+  let m;
+  while ((m = rx.exec(pattern)) !== null) {
+    re += pattern.slice(last, m.index).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re += '(?<' + m[1] + '>[^:]+)';
+    last = rx.lastIndex;
+  }
+  re += pattern.slice(last).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('^' + re + '$');
+}
+// (RegExp por entrada, memoizadas; el prefijo se valida aparte para no re-escaparlo.)
+const _KEY_PATTERN_RX = KEY_REGISTRY.map(e => ({ entry: e, rx: _compileKeyPattern(e.pattern) }));
+
+// resolveKey(fullKey): dada una clave completa ('budget-control:actuals:2026:03'),
+// devuelve { entry, params:{year:'2026', mm:'03'} } o null si no matchea ninguna
+// entrada del registro. Función PURA (no toca storage ni red).
+function resolveKey(fullKey) {
+  if (typeof fullKey !== 'string' || fullKey.indexOf(KEY_PREFIX) !== 0) return null;
+  const rest = fullKey.slice(KEY_PREFIX.length);
+  for (const { entry, rx } of _KEY_PATTERN_RX) {
+    const m = rx.exec(rest);
+    if (m) return { entry, params: { ...(m.groups || {}) } };
+  }
+  return null;
+}
+
+// buildKey(id, params): inverso de resolveKey. Construye la clave completa a partir
+// del id lógico y un objeto de params ({year, mm}). Devuelve null si faltan params.
+// Función PURA.
+function buildKey(id, params) {
+  const entry = KEY_REGISTRY_BY_ID[id];
+  if (!entry) return null;
+  params = params || {};
+  let out = entry.pattern;
+  for (const p of entry.params) {
+    if (params[p] == null) return null;
+    out = out.replace('{' + p + '}', String(params[p]));
+  }
+  return KEY_PREFIX + out;
+}
+
+// resolveEndpoint(fullKey, ctx): traduce una clave a su ruta REST según el registro.
+// ctx aporta el período activo para las claves GLOBALES 'latest' (mayor/balance/uf)
+// que no llevan año en la clave: ctx = { year, month }. Devuelve { method, path,
+// derive } o null. Es lógica PURA del router; el fetch real lo hace ApiBackend.
+function resolveEndpoint(fullKey, ctx) {
+  const r = resolveKey(fullKey);
+  if (!r) return null;
+  const { entry, params } = r;
+  ctx = ctx || {};
+
+  // Claves que se DERIVAN de otra ruta (no tienen endpoint directo).
+  if (entry.derive === 'cierres-list') {
+    // lista-cierres / ultimo-cierre ← GET /api/cierres/{year}
+    return { method: 'GET', path: '/api/cierres/' + params.year, derive: entry.derive };
+  }
+  if (entry.derive === 'erp-source') {
+    // mayor/balance/uf 'latest' (sin año): el router inyecta el período activo.
+    const tipo = entry.id === 'mayor-latest' ? 'mayor'
+               : entry.id === 'balance-latest' ? 'balance'
+               : 'uf';
+    const y = ctx.year, mo = ctx.month;
+    if (y == null || mo == null) return null; // sin período no se puede resolver
+    return { method: 'GET', path: '/api/erp-source/' + tipo + '/' + y + '/' + mo, derive: entry.derive };
+  }
+
+  if (!entry.endpoint) return null;
+  // Sustituir placeholders del endpoint con los params parseados de la clave.
+  // {mm} de la clave (01..12) mapea a {month} de la ruta; {mm}→{mes} en cierres.
+  let path = entry.endpoint
+    .replace('{year}', params.year != null ? params.year : '')
+    .replace('{month}', params.mm != null ? String(+params.mm) : '')
+    .replace('{mes}',   params.mm != null ? String(+params.mm) : '');
+  return { method: 'GET', path, derive: null };
+}
+
+// ─── dataStore — abstracción de persistencia async (ANDAMIAJE, NO CABLEADO) ─────
+//
+// OBJETIVO (CONEXION-POSTGRESQL.md §5): introducir una superficie async que HOY siga
+// 100% sobre localStorage (LocalBackend que envuelve el `storage` actual) y MAÑANA
+// pueda pegarle al API (ApiBackend que usa KEY_REGISTRY para mapear key→endpoint).
+//
+// ESTADO ACTUAL — INACTIVO POR DISEÑO:
+//   • window.ICEMM_BACKEND por DEFECTO es 'local' → dataStore delega en LocalBackend
+//     → mismo comportamiento que hoy (incl. corrupción/.corrupt, cuota, banners).
+//   • NINGUNA de las ~151 llamadas storage.get/set fue reemplazada. `storage` queda
+//     INTACTO. dataStore está DISPONIBLE pero NO se invoca en ningún flujo de la app.
+//   • ApiBackend implementa el fetch real (credenciales/headers) pero NO se ejecuta
+//     mientras el flag sea 'local'.
+//
+// PASO POSTERIOR (deliberado, separado y testeado — NO se hace aquí):
+//   El "cableado" consiste en (1) hidratar un snapshotCache en memoria al bootstrap
+//   leyendo del backend, y (2) REDEFINIR storage.get para leer del snapshotCache
+//   (seguiría síncrono → los 151 call sites no cambian de firma) y storage.set para
+//   escribir en el cache + encolar la mutación en la outbox (write-behind). Eso NO se
+//   activa en este commit: aquí sólo dejamos el esqueleto coherente y documentado.
+const dataStore = (() => {
+  // Flag global de backend. DEFECTO 'local'. Sólo se lee aquí; cambiarlo a 'api'
+  // es lo que activaría el ApiBackend (paso posterior, deliberado).
+  if (typeof window !== 'undefined' && window.ICEMM_BACKEND == null) {
+    window.ICEMM_BACKEND = 'local';
+  }
+  const getMode = () => (typeof window !== 'undefined' && window.ICEMM_BACKEND) || 'local';
+
+  // ── LocalBackend ───────────────────────────────────────────────────────────
+  // Envuelve el `storage` actual TAL CUAL: mismo parseo, misma detección de
+  // corrupción (.corrupt / storageWasCorrupt), mismos banners (notifyStorageError).
+  // Devuelve promesas resueltas de inmediato para igualar la superficie async, pero
+  // por dentro es 100% el comportamiento síncrono de hoy.
+  const LocalBackend = {
+    async get(key) { return storage.get(key); },
+    async set(key, value) { return storage.set(key, value); },
+  };
+
+  // ── Contexto de período activo para el router (claves 'latest') ─────────────
+  // El ApiBackend necesita {year, month} para resolver mayor/balance/uf 'latest'.
+  // Mientras esté inactivo no se usa; al cablear, el bootstrap lo setea desde config.
+  let _ctx = { year: null, month: null };
+  function setContext(ctx) { _ctx = { ..._ctx, ...(ctx || {}) }; }
+
+  // ── ApiBackend (NO se usa por defecto; flag en 'local') ─────────────────────
+  // Traduce key→endpoint con resolveEndpoint (router del KEY_REGISTRY) y hace fetch
+  // real con credenciales. GET para get(); para set() usa PUT idempotente a la misma
+  // ruta (el backend hace upsert). Las claves 'derivadas' (lista-cierres, latest) no
+  // se escriben por ruta directa: set() las rechaza (se derivan/POST aparte).
+  const API_BASE = (typeof window !== 'undefined' && window.ICEMM_API_BASE) || '';
+  function _authHeaders() {
+    // Esqueleto: al conectar, el token viaja por cookie httpOnly (mismo origen) o,
+    // de momento, por Authorization Bearer desde la sesión. Hoy no hay token.
+    const h = { 'Content-Type': 'application/json' };
+    try {
+      const tok = typeof window !== 'undefined' && window.ICEMM_TOKEN;
+      if (tok) h['Authorization'] = 'Bearer ' + tok;
+    } catch {}
+    return h;
+  }
+  const ApiBackend = {
+    async get(key) {
+      const route = resolveEndpoint(key, _ctx);
+      if (!route) throw new Error('[dataStore] sin ruta REST para clave: ' + key);
+      const res = await fetch(API_BASE + route.path, {
+        method: 'GET',
+        headers: _authHeaders(),
+        credentials: 'include', // cookie httpOnly cuando el front se sirva del mismo origen
+      });
+      if (res.status === 404) return null; // ausencia legítima (equivale a storage.get → null)
+      if (!res.ok) throw new Error('[dataStore] GET ' + route.path + ' → ' + res.status);
+      const body = await res.json();
+      // NOTA: las claves 'derive' (cierres-list / erp-source) requieren post-proceso
+      // (extraer la lista de meses, o el sub-objeto del período). Ese mapeo de forma
+      // se completa al cablear; aquí devolvemos el body crudo del endpoint derivado.
+      return body;
+    },
+    async set(key, value) {
+      const route = resolveEndpoint(key, _ctx);
+      if (!route) throw new Error('[dataStore] sin ruta REST para clave: ' + key);
+      if (route.derive) {
+        // No se escribe por ruta directa: lista/ultimo-cierre se derivan de cierres;
+        // mayor/balance 'latest' se cargan por su endpoint de ingesta, no por PUT genérico.
+        throw new Error('[dataStore] clave derivada no admite set directo: ' + key);
+      }
+      const res = await fetch(API_BASE + route.path, {
+        method: 'PUT', // upsert idempotente (CONEXION-PG §5: write-behind, last-writer-wins)
+        headers: _authHeaders(),
+        credentials: 'include',
+        body: JSON.stringify(value),
+      });
+      if (!res.ok) throw new Error('[dataStore] PUT ' + route.path + ' → ' + res.status);
+      return true;
+    },
+  };
+
+  // ── Outbox (write-behind) — ESQUELETO, no drena por defecto ─────────────────
+  // En modo API cada set encolaría {key,value,ts,opId} aquí; un worker la drena contra
+  // el API con reintento/backoff. Persistida en localStorage para sobrevivir recargas
+  // (la app sigue "síncrona por dentro" y la red queda detrás de la cola). HOY, con el
+  // flag en 'local', NADA se encola: estas funciones existen pero no se invocan.
+  const OUTBOX_KEY = 'budget-control:__outbox';
+  const outbox = {
+    _load() { try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]'); } catch { return []; } },
+    _save(q) { try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(q)); return true; } catch (e) { notifyStorageError(e); return false; } },
+    enqueue(key, value) {
+      const q = this._load();
+      // Coalescing por key (debounce de autosave): si ya hay una mutación pendiente
+      // de la misma clave, se reemplaza por la última (last-writer-wins en la cola).
+      const op = { key, value, ts: Date.now(), opId: (Date.now() + '-' + Math.random().toString(36).slice(2, 8)) };
+      const i = q.findIndex(o => o.key === key);
+      if (i >= 0) q[i] = op; else q.push(op);
+      return this._save(q);
+    },
+    peek() { return this._load(); },
+    // drain(): worker que vaciaría la cola contra ApiBackend con backoff. ESQUELETO:
+    // no se llama mientras el backend sea 'local'. Al cablear, se programa en bootstrap.
+    async drain() {
+      const q = this._load();
+      const rest = [];
+      for (const op of q) {
+        try { await ApiBackend.set(op.key, op.value); }
+        catch (e) {
+          // Conflicto/red: conservar para reintento. reportCriticalSaveFailure pasaría
+          // a significar "no se pudo encolar" o "el server rechazó" (409 de concurrencia).
+          rest.push(op);
+        }
+      }
+      this._save(rest);
+      return rest.length === 0;
+    },
+  };
+
+  // ── Hidratación al bootstrap (CONEXION-PG §5 punto 2) — ESQUELETO ────────────
+  // En modo API, antes del primer render útil, se precargarían del backend TODAS las
+  // claves del año/contexto activo a un snapshotCache en memoria; luego storage.get se
+  // redefiniría para leer de ese cache (sigue síncrono → 151 call sites intactos). Ese
+  // CABLEADO es el paso posterior; aquí sólo dejamos la lista de claves a hidratar y la
+  // firma del hidratador. NO se ejecuta con el flag en 'local'.
+  function keysToHydrate(year) {
+    // Claves del contexto del año activo que el bootstrap precargaría.
+    const ids = [
+      'projects', 'config', 'cc-url', 'schema-version', 'users',
+      'budget', 'overrides', 'proj-completion', 'proj-snapshot',
+      'cashflow', 'control-obras', 'plazo-curvas', 'saved-reports',
+      'lista-cierres', 'ultimo-cierre',
+      'check-snapshot', 'scenarios-snapshot', 'dashboard-snapshot', 'scorecard-snapshot',
+      'mayor-latest', 'balance-latest', 'uf-table',
+    ];
+    return ids.map(id => {
+      const e = KEY_REGISTRY_BY_ID[id];
+      return e.params.indexOf('year') >= 0 ? buildKey(id, { year }) : KEY_PREFIX + e.pattern;
+    });
+  }
+  async function hydrate(/* year */) {
+    // ESQUELETO: en modo API recorrería keysToHydrate(year) con ApiBackend.get y
+    // poblaría el snapshotCache. Deliberadamente vacío mientras el flag sea 'local'.
+    return; // no-op
+  }
+
+  // ── Fachada pública del dataStore ───────────────────────────────────────────
+  // get/set eligen el backend según el flag. POR DEFECTO ('local') delegan en
+  // LocalBackend → 100% el comportamiento de hoy. NADIE en la app llama a esto aún.
+  return {
+    KEY_REGISTRY, // re-exporto el registro para acceso desde el módulo
+    LocalBackend,
+    ApiBackend,
+    outbox,
+    setContext,
+    keysToHydrate,
+    hydrate,
+    resolveEndpoint,
+    backend() { return getMode() === 'api' ? ApiBackend : LocalBackend; },
+    async get(key) { return this.backend().get(key); },
+    async set(key, value) { return this.backend().set(key, value); },
+  };
+})();
+// Exponer en window para inspección/activación futura (NO se consume en runtime hoy).
+if (typeof window !== 'undefined') { window.ICEMM_dataStore = dataStore; }
+
 // ─── UTILIDADES ───────────────────────────────────────────────────────────────
 
 const fUF = v =>
