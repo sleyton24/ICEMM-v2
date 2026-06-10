@@ -168,23 +168,76 @@ const OC_PLAN = [
 
 // ─── STORAGE ─────────────────────────────────────────────────────────────────
 
+// Registro de claves cuya última lectura detectó corrupción (JSON inválido) y NO
+// ausencia legítima. Los callers que escriben un fallback (p.ej. el useEffect de
+// projects) consultan storageWasCorrupt(key) para NO pisar dato bueno-pero-ilegible.
+const _corruptKeys = new Set();
+function storageWasCorrupt(key) { return _corruptKeys.has(key); }
+function clearStorageCorrupt(key) { _corruptKeys.delete(key); }
+
 const storage = {
+  // Devuelve el valor parseado, o null si la clave está AUSENTE.
+  // Si la clave EXISTE pero su JSON es inválido (corrupción): conserva el raw en
+  // <key>.corrupt, marca la clave como corrupta (storageWasCorrupt), avisa al
+  // usuario por banner y devuelve null SIN destruir el dato corrupto. Los callers
+  // críticos deben consultar storageWasCorrupt() antes de re-escribir un fallback.
   get(key) {
+    let raw = null;
     try {
-      const raw = (window.storage && window.storage.getItem)
+      raw = (window.storage && window.storage.getItem)
         ? window.storage.getItem(key)
         : localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : null;
     } catch { return null; }
+    if (raw == null) { _corruptKeys.delete(key); return null; } // ausencia legítima
+    try {
+      const parsed = JSON.parse(raw);
+      _corruptKeys.delete(key); // lectura sana → limpiar marca previa
+      return parsed;
+    } catch (e) {
+      _corruptKeys.add(key);
+      // Preservar el raw corrupto para diagnóstico/recuperación manual (no sobrescribe
+      // el original; sólo deja una copia). No usar storage.set para evitar recursión.
+      try {
+        const ckey = key + '.corrupt';
+        try { if (window.storage && window.storage.setItem) window.storage.setItem(ckey, raw); } catch {}
+        try { localStorage.setItem(ckey, raw); } catch {}
+      } catch {}
+      console.error('[ICEMM] Dato corrupto en localStorage (JSON inválido):', key, e);
+      notifyStorageCorrupt(key);
+      return null;
+    }
   },
+  // Devuelve true si ALGUNA ruta de escritura tuvo éxito; false si TODAS fallaron
+  // (p.ej. cuota llena). Backward-compatible: los callers que ignoran el retorno
+  // siguen funcionando. notifyStorageError ya avisa al usuario por banner.
   set(key, value) {
     const raw = JSON.stringify(value);
     let ok = false;
-    try { if (window.storage && window.storage.setItem) { window.storage.setItem(key, raw); ok = true; } } catch (e) { notifyStorageError(e); }
-    try { localStorage.setItem(key, raw); ok = true; } catch (e) { notifyStorageError(e); }
+    let lastErr = null;
+    try { if (window.storage && window.storage.setItem) { window.storage.setItem(key, raw); ok = true; } } catch (e) { lastErr = e; }
+    try { localStorage.setItem(key, raw); ok = true; } catch (e) { lastErr = e; }
+    if (!ok && lastErr) notifyStorageError(lastErr); // sólo avisar si TODO falló
     return ok;
   },
 };
+
+// Aviso bloqueante de una escritura crítica que NO se pudo guardar. Lo usan los
+// setters importantes (cierre de mes, actuals, proyecciones, cashflow, projects):
+// si storage.set devuelve false, paran el flujo "como si hubieran guardado" y
+// muestran este banner persistente además del alert.
+function reportCriticalSaveFailure(what) {
+  try {
+    window.dispatchEvent(new CustomEvent('icemm-storage-error',
+      { detail: { quota: true, critical: true,
+        message: 'No se pudo guardar: ' + what + '. Tus cambios NO quedaron en disco.' } }));
+  } catch {}
+  try {
+    alert('⚠ NO SE PUDO GUARDAR: ' + what + '.\n\n' +
+      'El almacenamiento del navegador rechazó la escritura (probablemente está lleno).\n' +
+      'Tus cambios NO quedaron guardados. Respaldá tus datos (menú usuario → Respaldar datos), ' +
+      'liberá espacio y volvé a intentar.');
+  } catch {}
+}
 
 // Aviso de errores de almacenamiento (cuota llena, etc.). Lanza un evento que
 // <StorageErrorBanner> escucha; antes estos errores se tragaban en silencio.
@@ -201,19 +254,63 @@ function notifyStorageError(e) {
   } catch {}
 }
 
+// Aviso de DATO CORRUPTO en lectura (JSON inválido en una clave existente). Lo
+// dispara storage.get; <StorageErrorBanner> lo muestra. throttle independiente.
+let _lastStorageCorruptAt = 0;
+function notifyStorageCorrupt(key) {
+  const now = Date.now();
+  if (now - _lastStorageCorruptAt < 3000) return;
+  _lastStorageCorruptAt = now;
+  try {
+    window.dispatchEvent(new CustomEvent('icemm-storage-error',
+      { detail: { corrupt: true, key,
+        message: 'Dato corrupto detectado (' + key + '). Se conservó una copia en ' + key + '.corrupt; ese dato NO se sobreescribió.' } }));
+  } catch {}
+}
+
 // ─── RESPALDO / RESTAURACIÓN DE DATOS ───────────────────────────────────────────
-// Exporta TODAS las claves budget-control:* del navegador a un JSON descargable.
-function exportAllData() {
+const ICEMM_APP_ID = 'ICEMM-control-presupuestario';
+
+// Lee TODAS las claves budget-control:* del navegador como { key: rawString }.
+// Excluye las copias .corrupt y las propias claves de respaldo para no anidar
+// respaldos. Fuente única de verdad para exportAllData / import / migrateSchema.
+function collectAllData() {
   const data = {};
   let count = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || k.indexOf('budget-control:') !== 0) continue;
+    if (k.indexOf('budget-control:backup:') === 0) continue; // no respaldar respaldos
+    if (/\.corrupt$/.test(k)) continue;                       // no respaldar copias corruptas
+    data[k] = localStorage.getItem(k);
+    count++;
+  }
+  return { data, count };
+}
+
+// Arma el payload de respaldo (mismo formato que el JSON exportable), incluyendo
+// schemaVersion en _meta para que la importación pueda validarlo.
+function buildBackupPayload() {
+  const { data, count } = collectAllData();
+  return {
+    _meta: {
+      app: ICEMM_APP_ID,
+      schemaVersion: SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      keys: count,
+    },
+    data,
+  };
+}
+
+// Exporta TODAS las claves budget-control:* del navegador a un JSON descargable.
+function exportAllData() {
+  let payload, count;
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.indexOf('budget-control:') === 0) { data[k] = localStorage.getItem(k); count++; }
-    }
+    payload = buildBackupPayload();
+    count = payload._meta.keys;
   } catch (e) { alert('No se pudo leer el almacenamiento: ' + ((e && e.message) || e)); return; }
   if (!count) { alert('No hay datos budget-control:* para respaldar en este navegador.'); return; }
-  const payload = { _meta: { app: 'ICEMM-control-presupuestario', exportedAt: new Date().toISOString(), keys: count }, data };
   try {
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
@@ -223,6 +320,42 @@ function exportAllData() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   } catch (e) { alert('No se pudo generar el respaldo: ' + ((e && e.message) || e)); }
+}
+
+// ── Respaldo INTERNO (a una clave de localStorage) ───────────────────────────
+// Vuelca todas las claves budget-control:* a una clave de respaldo. Devuelve
+// true sólo si el respaldo quedó escrito (lo usan import y migrateSchema, que
+// abortan si el respaldo falla). suffix identifica el respaldo (p.ej. el motivo).
+const BACKUP_PREFIX = 'budget-control:backup:';
+function writeBackupToStorage(suffix) {
+  try {
+    const payload = buildBackupPayload();
+    if (!payload._meta.keys) return false; // nada que respaldar
+    const raw = JSON.stringify(payload);
+    const key = BACKUP_PREFIX + suffix;
+    let ok = false;
+    try { if (window.storage && window.storage.setItem) { window.storage.setItem(key, raw); ok = true; } } catch {}
+    try { localStorage.setItem(key, raw); ok = true; } catch {}
+    return ok;
+  } catch { return false; }
+}
+
+// Registro del ÚLTIMO respaldo realizado (fecha ISO). Se muestra en el menú de
+// usuario; sirve para avisar si pasaron demasiados días sin respaldar.
+const LAST_BACKUP_KEY = 'budget-control:last-backup';
+const BACKUP_STALE_DAYS = 7; // avisar si pasaron más de N días sin respaldo
+function recordBackupNow() {
+  try { storage.set(LAST_BACKUP_KEY, { at: new Date().toISOString() }); } catch {}
+}
+function getLastBackupAt() {
+  try { const v = storage.get(LAST_BACKUP_KEY); return v && v.at ? v.at : null; } catch { return null; }
+}
+function daysSinceLastBackup() {
+  const at = getLastBackupAt();
+  if (!at) return Infinity;
+  const t = Date.parse(at);
+  if (isNaN(t)) return Infinity;
+  return (Date.now() - t) / 86400000;
 }
 
 // Abre un selector de archivo y restaura un respaldo JSON (SOBRESCRIBE el navegador actual).
@@ -238,20 +371,71 @@ function pickAndImportData() {
       let parsed;
       try { parsed = JSON.parse(e.target.result); }
       catch (err) { alert('Archivo inválido (no es JSON): ' + ((err && err.message) || err)); return; }
+
+      // 1) Validar _meta (app y schemaVersion) contra la versión actual.
+      const meta = parsed && parsed._meta;
+      if (meta && meta.app && meta.app !== ICEMM_APP_ID) {
+        alert(`Este archivo no parece un respaldo de esta aplicación (app="${meta.app}").\nImportación cancelada.`);
+        return;
+      }
+      let versionWarn = '';
+      if (meta && meta.schemaVersion != null && +meta.schemaVersion !== SCHEMA_VERSION) {
+        versionWarn = `\n\n⚠ El respaldo es de schema v${meta.schemaVersion} y esta app usa v${SCHEMA_VERSION}. ` +
+          `Tras restaurar, la app intentará migrarlo, pero revisá los datos.`;
+      }
+
       const data = parsed && parsed.data ? parsed.data : parsed;
-      const keys = Object.keys(data || {}).filter(k => k.indexOf('budget-control:') === 0);
+      const keys = Object.keys(data || {}).filter(k => k.indexOf('budget-control:') === 0
+        && k.indexOf(BACKUP_PREFIX) !== 0 && !/\.corrupt$/.test(k));
       if (!keys.length) { alert('El archivo no contiene datos budget-control:*'); return; }
-      if (!confirm(`Vas a restaurar ${keys.length} claves de datos.\n\nEsto SOBRESCRIBE los datos actuales de este navegador. Si dudás, cancelá y respaldá primero.\n\n¿Continuar?`)) return;
-      let okCount = 0;
-      keys.forEach(k => {
+
+      // 2) Preparar TODO en memoria y validar ANTES de escribir (todo-o-nada).
+      const toWrite = [];
+      for (const k of keys) {
         const v = data[k];
         const raw = typeof v === 'string' ? v : JSON.stringify(v);
+        try { JSON.parse(raw); } // cada valor debe ser JSON válido
+        catch (err) { alert(`El respaldo está dañado: la clave "${k}" no es JSON válido.\nImportación cancelada (no se modificó nada).`); return; }
+        toWrite.push([k, raw]);
+      }
+
+      if (!confirm(`Vas a restaurar ${keys.length} claves de datos.\n\nEsto SOBRESCRIBE los datos actuales de este navegador.\nSe respaldarán automáticamente tus datos actuales antes de continuar.${versionWarn}\n\n¿Continuar?`)) return;
+
+      // 3) Respaldar el estado ACTUAL antes de sobrescribir. Si falla, abortar.
+      if (!writeBackupToStorage('pre-import')) {
+        if (!confirm('No se pudo crear un respaldo automático de tus datos actuales (¿almacenamiento lleno?).\n\nSi continuás y algo sale mal, podrías perder los datos actuales.\n\n¿Continuar de todos modos?')) return;
+      }
+
+      // 4) Escribir todo-o-nada. Si una escritura falla, intentar revertir las ya
+      //    hechas desde el respaldo recién creado, para no dejar el storage a medias.
+      const written = [];
+      let failedKey = null;
+      for (const [k, raw] of toWrite) {
         let wrote = false;
         try { localStorage.setItem(k, raw); wrote = true; } catch (err) { notifyStorageError(err); }
         try { if (window.storage && window.storage.setItem) { window.storage.setItem(k, raw); wrote = true; } } catch {}
-        if (wrote) okCount++;
-      });
-      alert(`Restauradas ${okCount} de ${keys.length} claves. La aplicación se recargará.`);
+        if (!wrote) { failedKey = k; break; }
+        written.push(k);
+      }
+      if (failedKey) {
+        // Revertir lo escrito a partir del respaldo pre-import.
+        try {
+          const bk = storage.get(BACKUP_PREFIX + 'pre-import');
+          const prevData = bk && bk.data ? bk.data : {};
+          written.forEach(k => {
+            const pv = prevData[k];
+            try {
+              if (pv == null) localStorage.removeItem(k);
+              else localStorage.setItem(k, typeof pv === 'string' ? pv : JSON.stringify(pv));
+            } catch {}
+          });
+        } catch {}
+        alert(`No se pudo completar la importación (falló al escribir "${failedKey}", probablemente almacenamiento lleno).\n\nSe intentó revertir los cambios al estado previo. Liberá espacio y reintentá.`);
+        return;
+      }
+
+      recordBackupNow();
+      alert(`Restauradas ${keys.length} claves. La aplicación se recargará.`);
       location.reload();
     };
     reader.onerror = () => alert('No se pudo leer el archivo.');
@@ -2341,6 +2525,22 @@ function migrateSchema() {
   try {
     const cur = +storage.get('budget-control:schema-version') || 1;
     if (cur >= SCHEMA_VERSION) return;
+    // RESPALDO PRE-MIGRACIÓN (no migrar sin red): volcar todas las claves
+    // budget-control:* a una clave de respaldo ANTES de tocar nada. Si el
+    // respaldo no se puede escribir, ABORTAR la migración (mejor no migrar que
+    // reescribir el storage sin copia de seguridad). Sufijo determinista
+    // origen→destino (no Date.now()): idempotente y no depende del reloj.
+    const backupSuffix = `pre-migracion:${cur}-${SCHEMA_VERSION}`;
+    if (!writeBackupToStorage(backupSuffix)) {
+      console.error('[ICEMM] Migración ABORTADA: no se pudo crear el respaldo previo (' + backupSuffix + ').');
+      try {
+        window.dispatchEvent(new CustomEvent('icemm-storage-error',
+          { detail: { quota: true, critical: true,
+            message: 'No se pudo respaldar antes de migrar el esquema; la migración se canceló para no arriesgar tus datos. Liberá espacio y recargá.' } }));
+      } catch {}
+      return;
+    }
+    console.info('[ICEMM] Respaldo pre-migración creado: ' + BACKUP_PREFIX + backupSuffix);
     let reclasRows = 0, reclasKeys = 0;
     for (let y = 2023; y <= 2032; y++) {
       for (let m = 1; m <= 12; m++) {
@@ -2672,12 +2872,18 @@ function DataLoader({ projects, activeYear }) {
     if (yaCargados.length && !confirm(`Estos meses YA tienen datos cargados y serán SOBRESCRITOS:\n  ${yaCargados.join(', ')}\n\n¿Continuar y reemplazarlos?`)) return;
     const now = new Date();
     const entries = [];
+    let saveFailed = null;
     Object.entries(managerStage.byMonth).forEach(([, { year, month, rows, rowCount }]) => {
       const key = `budget-control:actuals:${year}:${String(month).padStart(2,'0')}`;
-      storage.set(key, { year, month, rows, loadedAt: now.toISOString(), filename: managerStage.filename });
+      const okWrite = storage.set(key, { year, month, rows, loadedAt: now.toISOString(), filename: managerStage.filename });
+      if (!okWrite) { saveFailed = `${String(month).padStart(2,'0')}/${year}`; return; }
       entries.push({ type:'manager', year, month, filename: managerStage.filename,
         loadedAt: now.toLocaleString('es-CL'), rowCount });
     });
+    if (saveFailed) {
+      reportCriticalSaveFailure(`datos del Reporte Manager (${saveFailed})`);
+      return; // no marcar como guardado ni actualizar historial
+    }
     setHistory(prev => {
       let h = [...prev];
       entries.forEach(entry => {
@@ -4764,7 +4970,12 @@ function ProjectionModule({ projects, activeYear }) {
       let cur = next;
       path.slice(0, -1).forEach(k => { if (!cur[k]) cur[k] = {}; cur = cur[k]; });
       cur[path[path.length - 1]] = value;
-      try { storage.set(`budget-control:overrides:${year}`, next); } catch {}
+      try {
+        if (!storage.set(`budget-control:overrides:${year}`, next)) {
+          reportCriticalSaveFailure(`proyección/override de ${year}`);
+          return prev; // no avanzar el estado si no se persistió
+        }
+      } catch { reportCriticalSaveFailure(`proyección/override de ${year}`); return prev; }
       return next;
     });
     setEditKey(null);
@@ -7328,12 +7539,18 @@ function ReportModule({ projects, activeYear }) {
     // Snapshot global
     const snap = buildGlobalSnapshot(year, controlMonth);
     snap.modulos.report = reportSnap;
-    storage.set(cierreKey(year, controlMonth), snap);
+    if (!storage.set(cierreKey(year, controlMonth), snap)) {
+      reportCriticalSaveFailure(`cierre de ${MONTH_ABR[controlMonth-1]} ${year}`);
+      return; // no seguir como si el cierre se hubiera guardado
+    }
 
     // Actualizar lista de cierres
     const nuevaLista = [...new Set([...lista, controlMonth])].sort((a,b) => a-b);
-    storage.set(listaCierresKey(year), nuevaLista);
-    storage.set(ultimoCierreKey(year), controlMonth);
+    if (!storage.set(listaCierresKey(year), nuevaLista) ||
+        !storage.set(ultimoCierreKey(year), controlMonth)) {
+      reportCriticalSaveFailure(`lista de cierres de ${year}`);
+      return;
+    }
 
     // Guardar también como informe de comparación (reemplaza el del mismo mes
     // si se vuelve a cerrar) → alimenta "Comparar con" en el mes siguiente
@@ -7349,6 +7566,11 @@ function ReportModule({ projects, activeYear }) {
     const updatedSaved = [cmpEntry, ...prevSaved.filter(r => r.controlMonth !== controlMonth)];
     storage.set(`budget-control:saved-reports:${year}`, updatedSaved);
     setSavedReportsRM(updatedSaved);
+
+    // RESPALDO PERIÓDICO: tras un cierre exitoso, dejar una copia interna y
+    // registrar la fecha (se muestra en el menú de usuario). Si no entra (cuota),
+    // no bloquea el cierre — el banner de error ya avisará si la copia falló.
+    if (writeBackupToStorage('post-cierre')) recordBackupNow();
 
     setRefreshKey(k => k + 1);
     alert(`✓ Informe ${MONTH_ABR[controlMonth-1]} ${year} cerrado correctamente.\n\nQuedó guardado como "${cmpEntry.label}" para comparar con el informe del mes siguiente.\n\nEl próximo informe a trabajar es ${MONTH_ABR[controlMonth]} ${year}.`);
@@ -8010,17 +8232,28 @@ function Header({ activeYear, setActiveYear, view, onCreateNextYear, user, onLog
             </div>
             <span className="text-[9px] text-gray-300 ml-0.5">▾</span>
           </button>
-          {menuOpen && (
+          {menuOpen && (() => {
+            const lastBk = getLastBackupAt();
+            const stale  = daysSinceLastBackup() > BACKUP_STALE_DAYS;
+            const lastBkLabel = lastBk
+              ? new Date(lastBk).toLocaleDateString('es-CL', { day:'2-digit', month:'short', year:'numeric' })
+              : 'nunca';
+            return (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-              <div className="absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-xl border border-gray-100 py-1 z-50">
+              <div className="absolute right-0 mt-1 w-52 bg-white rounded-lg shadow-xl border border-gray-100 py-1 z-50">
+                <div className={`px-4 py-1.5 text-[10px] leading-tight ${stale ? 'text-amber-600' : 'text-gray-400'}`}>
+                  Último respaldo: <span className="font-semibold">{lastBkLabel}</span>
+                  {stale && <div className="text-amber-600">⚠ Hace más de {BACKUP_STALE_DAYS} días. Respaldá tus datos.</div>}
+                </div>
+                <div className="border-t border-gray-100 my-1" />
                 {user?.role === 'admin' && (
                   <button onClick={() => { setMenuOpen(false); onOpenUsers && onOpenUsers(); }}
                     className="w-full text-left px-4 py-2 text-xs text-gray-600 hover:bg-gray-50 flex items-center gap-2">
                     <span>👥</span> Usuarios y Permisos
                   </button>
                 )}
-                <button onClick={() => { setMenuOpen(false); exportAllData(); }}
+                <button onClick={() => { setMenuOpen(false); exportAllData(); recordBackupNow(); }}
                   className="w-full text-left px-4 py-2 text-xs text-gray-600 hover:bg-gray-50 flex items-center gap-2">
                   <span>💾</span> Respaldar datos
                 </button>
@@ -8035,7 +8268,8 @@ function Header({ activeYear, setActiveYear, view, onCreateNextYear, user, onLog
                 </button>
               </div>
             </>
-          )}
+            );
+          })()}
         </div>
       </div>
     </header>
@@ -8158,7 +8392,9 @@ function CashFlowModule({ projects, activeYear }) {
   }, [year, refreshKey]);
 
   useEffect(() => {
-    storage.set(`budget-control:cashflow:${year}`, cfData);
+    if (!storage.set(`budget-control:cashflow:${year}`, cfData)) {
+      reportCriticalSaveFailure(`flujo de caja de ${year}`);
+    }
   }, [cfData, year]);
 
   // ── Data from storage ────────────────────────────────────────────────────────
@@ -11825,7 +12061,7 @@ class ErrorBoundary extends React.Component {
             {String((this.state.error && this.state.error.message) || this.state.error)}
           </pre>
           <div className="flex gap-2">
-            <button onClick={() => exportAllData()}
+            <button onClick={() => { exportAllData(); recordBackupNow(); }}
               className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700">💾 Respaldar datos</button>
             <button onClick={() => this.setState({ error: null })}
               className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-50">Reintentar</button>
@@ -11850,13 +12086,14 @@ function StorageErrorBanner() {
     return () => window.removeEventListener('icemm-storage-error', h);
   }, []);
   if (!err) return null;
+  const msg = err.corrupt
+    ? ('⚠ Dato corrupto: ' + (err.message || '') + ' Revisá/restaurá un respaldo antes de seguir trabajando.')
+    : err.quota
+      ? '⚠ Almacenamiento lleno: los últimos cambios NO se guardaron. Respaldá tus datos (menú usuario → Respaldar datos) y liberá espacio.'
+      : ('⚠ Error al guardar datos: ' + (err.message || ''));
   return (
     <div className="fixed top-0 inset-x-0 z-[100] bg-red-600 text-white px-4 py-2 text-xs sm:text-sm flex items-center justify-between shadow-lg">
-      <span className="pr-3">
-        {err.quota
-          ? '⚠ Almacenamiento lleno: los últimos cambios NO se guardaron. Respaldá tus datos (menú usuario → Respaldar datos) y liberá espacio.'
-          : ('⚠ Error al guardar datos: ' + (err.message || ''))}
-      </span>
+      <span className="pr-3">{msg}</span>
       <button onClick={() => setErr(null)} className="ml-2 font-bold shrink-0 hover:opacity-80">✕</button>
     </div>
   );
@@ -11905,14 +12142,41 @@ function App() {
     if (user && view !== 'users' && !canView(view)) setView(defaultViewFor(user));
   }, [user, view]);
 
+  // Si la lectura inicial de projects falló por CORRUPCIÓN (no por ausencia),
+  // cargamos los sample SÓLO en memoria para no dejar la app en blanco, pero
+  // marcamos projectsCorrupt para que el useEffect de persistencia NO pise el
+  // dato bueno-pero-ilegible que sigue en disco (lo arregla un restore manual).
+  const [projectsCorrupt, setProjectsCorrupt] = useState(false);
   useEffect(() => {
     const saved = storage.get('budget-control:projects');
+    if (storageWasCorrupt('budget-control:projects')) {
+      setProjectsCorrupt(true);
+      setProjects(makeSampleProjects()); // sólo para que la UI no quede vacía
+      return;
+    }
     setProjects(saved && saved.length > 0 ? saved : makeSampleProjects());
   }, []);
 
   useEffect(() => {
-    if (projects.length > 0) storage.set('budget-control:projects', projects);
-  }, [projects]);
+    // NO re-persistir mientras la clave esté marcada corrupta: pisaría el dato
+    // bueno-pero-ilegible con los sample. El usuario debe restaurar un respaldo.
+    if (projectsCorrupt || storageWasCorrupt('budget-control:projects')) return;
+    if (projects.length > 0 && !storage.set('budget-control:projects', projects)) {
+      reportCriticalSaveFailure('lista de proyectos');
+    }
+  }, [projects, projectsCorrupt]);
+
+  // RESPALDO PERIÓDICO (1 vez al día por sesión): si pasó más de un día desde el
+  // último respaldo registrado, dejar una copia interna al iniciar sesión. Sólo
+  // una vez por carga de la app (didDailyBackup) para no respaldar en cada render.
+  const didDailyBackup = useRef(false);
+  useEffect(() => {
+    if (!user || didDailyBackup.current) return;
+    didDailyBackup.current = true;
+    if (daysSinceLastBackup() >= 1) {
+      if (writeBackupToStorage('diario')) recordBackupNow();
+    }
+  }, [user]);
 
   const createNextYear = useCallback(() => {
     const nextYear = activeYear + 1;
