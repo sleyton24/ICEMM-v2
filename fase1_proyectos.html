@@ -11930,12 +11930,22 @@ function ControlCostosModule({ projects, activeYear }) {
   }, [activeProjects, selId]);
 
   // URL de la app Control de Costos desplegada (Presto). Configurable y persistida.
+  // Solo se aceptan URLs http(s): evita inyección de javascript:/data: en el iframe o window.open.
+  const DEFAULT_CC_URL = 'http://187.127.29.98';
+  const sanitizeCcUrl = (raw) => {
+    const s = String(raw ?? '').trim();
+    try { const u = new URL(s); return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null; }
+    catch { return null; }
+  };
   const [ccUrl, setCcUrl] = useState(() => {
-    try { return storage.get('budget-control:cc-url') || 'http://187.127.29.98'; } catch { return 'http://187.127.29.98'; }
+    try { return sanitizeCcUrl(storage.get('budget-control:cc-url')) || DEFAULT_CC_URL; } catch { return DEFAULT_CC_URL; }
   });
   const editCcUrl = () => {
-    const v = prompt('URL de la app Control de Costos (Presto):', ccUrl);
-    if (v != null) { const u = v.trim(); storage.set('budget-control:cc-url', u); setCcUrl(u); }
+    const v = prompt('URL de la app Control de Costos (Presto) — debe empezar con http:// o https://', ccUrl);
+    if (v == null) return;
+    const u = sanitizeCcUrl(v);
+    if (!u) { alert('URL inválida. Ingresá una dirección http:// o https:// válida.'); return; }
+    storage.set('budget-control:cc-url', u); setCcUrl(u);
   };
   // Vista por defecto = la app ICEMM embebida (conserva su propia carga de archivos
   // Excel: parseItemizado/parseRealERP → backend → Postgres). 'resumen' = vista del tablero.
