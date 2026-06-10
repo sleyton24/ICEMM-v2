@@ -2451,7 +2451,8 @@ function AnnualBudget({ year, projects }) {
         <div className="flex items-center gap-2">
           {(() => {
             const allKeys = activeProjects.flatMap(p => [`ing:${p.id}`, `cst:${p.id}`]);
-            const allCollapsed = ingSecCollapsed && cosSecCollapsed && ocSecCollapsed && resSecCollapsed;
+            const allCollapsed = ingSecCollapsed && cosSecCollapsed && ocSecCollapsed && resSecCollapsed
+              && ocCollapsed && allKeys.every(k => collapsedProjects.has(k));
             const toggleAll = () => {
               if (allCollapsed) {
                 setIngSecCollapsed(false);
@@ -6433,7 +6434,9 @@ function ProjectionModule({ projects, activeYear }) {
                 ? <span className="flex items-center justify-end gap-1">
                     {(projCompletion?.[savePath[0]]?.cats?.[savePath[2]] != null ||
                       projCompletion?.[savePath[0]]?.overrideContract?.[savePath[2]] != null) &&
-                      <span className="text-[9px] text-amber-500 opacity-0 group-hover:opacity-100">↺</span>}
+                      <button type="button" title="Restaurar valor calculado"
+                        onClick={e => { e.stopPropagation(); saveProjCompletion(savePath, null); }}
+                        className="text-[9px] text-amber-500 opacity-0 group-hover:opacity-100 hover:text-amber-700 cursor-pointer">↺</button>}
                     {fN(proy)}
                   </span>
                 : <span className="text-gray-300">—</span>
