@@ -8869,6 +8869,19 @@ function VCell({ val, onChange }) {
 function CashFlowModule({ projects, activeYear }) {
   const year = activeYear;
 
+  // Tasas tributarias (Chile) — centralizadas para no repetir literales en el cálculo de caja.
+  const TASA_IVA = 0.19;    // IVA débito/crédito
+  const TASA_PPM = 0.01;    // Pago Provisional Mensual (sobre ingresos op. del mes anterior)
+  const FACTOR_IVA = 1.19;  // 1 + IVA, para montos con IVA incluido (CxC default)
+  // Saldos de apertura REALES de ICEMM para 2026 (CxC/CxP ene-abr y saldo IVA dic-2025) — NO son demo.
+  // Solo se siembran si los campos están vírgenes (no pisan ediciones). Para otro año/empresa, vaciar
+  // este bloque o ingresar los saldos como datos en el módulo Flujo de Caja.
+  const APERTURA_2026 = {
+    cxc: { 1: -84, 2: -16975, 3: 11300, 4: -7003 },
+    cxp: { 1: -24, 2: 152, 3: -88, 4: 1302 },
+    saldoIVADicAnterior: -84,
+  };
+
   const fN = n => {
     const v = +n || 0;
     if (Math.abs(v) < 0.005) return '—';
@@ -8912,13 +8925,13 @@ function CashFlowModule({ projects, activeYear }) {
     if (d.saldoIVADicAnterior === undefined) d = { ...d, saldoIVADicAnterior: 0 };
     if (d.pctIVACostos       === undefined) d = { ...d, pctIVACostos: 0.77 };
     if (d.pctIVAOC           === undefined) d = { ...d, pctIVAOC: 0.05 };
-    // Pre-población de valores históricos 2026 si los campos aún están en cero
+    // Pre-población de saldos de apertura reales 2026 si los campos aún están en cero (ver APERTURA_2026).
     if (year === 2026) {
       const cxcVirgen = [1,2,3,4].every(m => !(+d.cxc?.[m]));
       const cxpVirgen = [1,2,3,4].every(m => !(+d.cxp?.[m]));
-      if (cxcVirgen) d = { ...d, cxc: { ...d.cxc, 1: -84, 2: -16975, 3: 11300, 4: -7003 } };
-      if (cxpVirgen) d = { ...d, cxp: { ...d.cxp, 1: -24,  2:   152, 3:   -88, 4:  1302 } };
-      if (!d.saldoIVADicAnterior) d = { ...d, saldoIVADicAnterior: -84 };
+      if (cxcVirgen) d = { ...d, cxc: { ...d.cxc, ...APERTURA_2026.cxc } };
+      if (cxpVirgen) d = { ...d, cxp: { ...d.cxp, ...APERTURA_2026.cxp } };
+      if (!d.saldoIVADicAnterior) d = { ...d, saldoIVADicAnterior: APERTURA_2026.saldoIVADicAnterior };
     }
     setCfData(d);
 
@@ -9232,7 +9245,7 @@ function CashFlowModule({ projects, activeYear }) {
       const totalEdp        = Object.values(edp).reduce((s,v) => s+v, 0);
       const otrosIng        = getOtrosIngProy(m);
       const totalIngresosOp = totalAnticipos + totalEdp + otrosIng;   // Línea 8
-      const ivaDebito       = totalIngresosOp * 0.19;                 // Línea 9: base = ingresos operacionales completos (incl. anticipos)
+      const ivaDebito       = totalIngresosOp * TASA_IVA;                 // Línea 9: base = ingresos operacionales completos (incl. anticipos)
       const totalIngresos   = totalIngresosOp + ivaDebito;
       const totalCostos     = Object.values(costos).reduce((s,v) => s+v, 0);
       const oc              = -getOCProy(m);
@@ -9248,14 +9261,14 @@ function CashFlowModule({ projects, activeYear }) {
       const row  = rows[m];
       const prev = m > 1 ? rows[m-1] : null;
       // IVA Crédito: porcentaje configurable por el usuario
-      const ivaCredito = -(pCostos * 0.19 * Math.abs(row.totalCostos) + pOC * 0.19 * Math.abs(row.oc));
+      const ivaCredito = -(pCostos * TASA_IVA * Math.abs(row.totalCostos) + pOC * TASA_IVA * Math.abs(row.oc));
       // IVA Acumulado: si saldo anterior > 0 (ya pagado al SII), reiniciar; si ≤ 0, arrastrar excedente
       const ivaCredAcum = saldoIVAPrev > 0 ? ivaCredito : saldoIVAPrev + ivaCredito;
       const saldoContador = ivaCredAcum + row.ivaDebito;
       // Pago IVA este mes = saldo positivo del mes anterior (se declara y paga al SII con 1 mes de rezago)
       const ivaNeto = Math.max(0, saldoIVAPrev);
       // PPM: 1% del total ingresos operacionales del mes anterior (base bruta, incluye anticipos)
-      const ppm = prev ? prev.totalIngresosOp * 0.01 : 0;
+      const ppm = prev ? prev.totalIngresosOp * TASA_PPM : 0;
       const impRenta = m === 4 ? Math.abs(+(cfData.impuestoRenta || 0)) : 0;
       const totalTributos = -(ivaNeto + ppm + impRenta);
       // CxC default para meses de proyección: desfase de 1 mes en cobro (excluye AD que cobra al contado)
@@ -9263,7 +9276,7 @@ function CashFlowModule({ projects, activeYear }) {
       if (m > controlMonth && prev) {
         const adPrev = adProjs.reduce((s,p) => s + (prev.edp[p.id]||0) + (prev.anticipos[p.id]||0), 0);
         const adCur  = adProjs.reduce((s,p) => s + (row.edp[p.id]||0) + (row.anticipos[p.id]||0), 0);
-        cxcDefault = (prev.totalIngresosOp - adPrev - (row.totalIngresosOp - adCur)) * 1.19;
+        cxcDefault = (prev.totalIngresosOp - adPrev - (row.totalIngresosOp - adCur)) * FACTOR_IVA;
       }
       const cxp = +(cfData.cxp?.[m] || 0);
       const cxcRaw = cfData.cxc?.[m];
@@ -12205,7 +12218,7 @@ function PlazoSCurveChart({ months, programada, controlada }) {
 }
 
 // Panel de carga + gráfico de la curva S de avance (área Plazo)
-function PlazoCurvaPanel({ project, year, onChange }) {
+function PlazoCurvaPanel({ project, year, onChange, disabled = false }) {
   const months = useMemo(() => projectScheduleMonths(project, year), [project, year]);
   const [curvas, setCurvas] = useState(() => getPlazoCurvas(year, project.id));
   useEffect(() => { setCurvas(getPlazoCurvas(year, project.id)); }, [project, year]);
@@ -12231,6 +12244,7 @@ function PlazoCurvaPanel({ project, year, onChange }) {
   }
 
   function handleUpload(e) {
+    if (disabled) return;
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
@@ -12279,6 +12293,7 @@ function PlazoCurvaPanel({ project, year, onChange }) {
   }
 
   function clearCurvas() {
+    if (disabled) return;
     if (!confirm('¿Borrar las curvas de avance de este proyecto?')) return;
     savePlazoCurvas(year, project.id, null);
     reload();
@@ -12295,11 +12310,17 @@ function PlazoCurvaPanel({ project, year, onChange }) {
         <span className="text-[10px] text-gray-400">{months.length} meses · programado vs controlado</span>
         <div className="ml-auto flex items-center gap-2">
           <Btn variant="ghost" size="sm" onClick={downloadTemplate}>⬇ Template</Btn>
-          <label className="text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-[#1C3460] text-white hover:bg-[#2d4f7f] cursor-pointer transition-colors">
-            ⬆ Subir curvas
-            <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleUpload} />
-          </label>
-          {hasCurvas && <Btn variant="ghost" size="sm" onClick={clearCurvas}>🗑</Btn>}
+          {disabled ? (
+            <span className="text-[10px] text-blue-600 font-semibold whitespace-nowrap">🔒 Mes cerrado — solo lectura</span>
+          ) : (
+            <>
+              <label className="text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-[#1C3460] text-white hover:bg-[#2d4f7f] cursor-pointer transition-colors">
+                ⬆ Subir curvas
+                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleUpload} />
+              </label>
+              {hasCurvas && <Btn variant="ghost" size="sm" onClick={clearCurvas}>🗑</Btn>}
+            </>
+          )}
         </div>
       </div>
       <div className="p-4">
@@ -12457,7 +12478,7 @@ function ControlObrasModule({ projects, activeYear }) {
       {selProject && (
         <>
           {/* Curva S de avance físico (área Plazo) */}
-          <PlazoCurvaPanel project={selProject} year={year} onChange={() => setCurvaRefresh(k => k + 1)} />
+          <PlazoCurvaPanel project={selProject} year={year} onChange={() => setCurvaRefresh(k => k + 1)} disabled={isClosed} />
 
           {/* Formularios de las 5 áreas manuales */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
