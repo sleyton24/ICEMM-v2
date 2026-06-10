@@ -4,6 +4,24 @@
 > módulo-por-módulo. Documento vivo: marcar tareas a medida que se completan.
 > Veredicto actual: **NO-GO** hasta cerrar las fases P0/P1.
 
+## Estado al 2026-06-10 (avance de código)
+
+Trabajo de código en rama `frente3-8-categorias` (verificado: Babel OK + 266 tests `src/lib`; navegación
+probada en navegador por el usuario). **NADA aplicado al VPS todavía** (por decisión: el VPS se toca al final).
+
+- ✅ **Fase 1** — monolito: arrastre de saldo IVA entre años, validación de `unCode`/fechas/montos, anticipos
+  demo 2026 removidos, fix TDZ de Control de Costos. ICEMM endurecido **preparado sin commitear** (repo público).
+- 🔴 **Fase 2** — BLOQUEADA por Acta 1 (mapeo 600/700/800). Respaldo automático pre-migración ya implementado.
+- ✅ **Fase 3** — COMPLETA (P0+P1): snapshots reales de Dashboard/Escenarios/Check/Scorecard, bloqueo de edición
+  de Control de Obras en meses cerrados, vista de período cerrado completa en Proyecciones, frescura de caja.
+- ✅ **Fase 4** — persistencia robusta (sin pérdida silenciosa, corrupción visible, import seguro, respaldo
+  automático+periódico). Falta `dataStore` async (prereq de Fase 5).
+- 🔴 **Fase 5** — depende de todo + seguridad + Acta 1.
+- 🟡 **Fase 6** — `cfRows` portado a `src/lib` con tests. Falta build Vite.
+
+**El código seguro y no bloqueado está esencialmente agotado.** El camino crítico ahora es del usuario:
+**(A)** incidente de seguridad y **(B)** las 2 actas contables (ver sección de tareas humanas más abajo / chat).
+
 ## Visión general
 
 El monolito `fase1_proyectos.html` funciona hoy como **prototipo monousuario sobre localStorage**
