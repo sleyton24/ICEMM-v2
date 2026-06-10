@@ -22,7 +22,7 @@ migre a Vite, el monolito importará desde acá y se elimina la duplicación.
 | `curvas.js` | `monthsBetween`, `generateSCurve`, `normalizeCurve`, `reescalarCurva`, `applyShift`, `projectMonthIdx` |
 | `clasificacion.js` | `classifyManagerCode` + constantes `COST_CATS` (8), `PROJ_CATS`, `DEFAULT_COST_PCTS`, `OC_CATS`, `OC_PLAN`, `emptyBudget` — **fuente única del catálogo** |
 | `ingresos.js` | `calcMonthlyRevenue` (Suma Alzada / Admin Delegada), `snapshotProjects` (importa `COST_CATS` de `clasificacion.js`) |
-| `flujocaja.js` | fórmulas puras de caja: `ivaDebito`, `ivaCredito`, `ivaCredAcum`, `saldoContador`, `ivaNetoMes`, `ppm`, `fcMes`, `cajaFinal` |
+| `flujocaja.js` | fórmulas puras de caja: `ivaDebito`, `ivaCredito`, `ivaCredAcum`, `saldoContador`, `ivaNetoMes`, `ppm`, `fcMes`, `cajaFinal`, `saldoIVADicFinal`, `arrastrarSaldoIVA` + **`cfRowsMatrix`** (matriz mensual completa, 3 pasadas; port verbatim de `cfRows`) |
 | `resultado.js` | `ingresosTotales`, `resultadoOperacional`, `ebitda`, agregación `ytd`/`ytg`/`fy` |
 | `formato.js` | `fUF`, `fN`, parseo de número chileno |
 | `migracion.js` | `reclasificarActuals`, `migrarProjectBudget` — espeja la migración v2 del monolito |
@@ -57,3 +57,30 @@ del costo de obra). `confirmManagerLoad` además **avisa antes de sobrescribir**
 cargado. Lógica espejada y testeada en `validacionCarga.js`.
 
 Estado al 2026-06-09: **224 tests, 9 módulos, todo en verde** (rama `frente3-8-categorias`).
+
+## Fase 6 (P2) — matriz de flujo de caja portada (2026-06-10)
+
+`cfRowsMatrix` (en `flujocaja.js`, tests en `cashflowMatrix.test.js`) es el port **VERBATIM**
+de la función `cfRows` del monolito (`fase1_proyectos.html`, ~L8435-8511): el cálculo en
+**3 pasadas** que arma la matriz mensual del Flujo de Caja (la lógica financiera más sensible
+de la app, antes sin red de tests propia). Reusa los helpers por celda ya portados
+(`ivaDebito`, `ivaCredito`, `ivaCredAcum`, `saldoContador`, `ivaNetoMes`, `ppm`, `fcMes`,
+`cajaFinal`) y solo orquesta las pasadas:
+
+- **Pasada 1** — ingresos/egresos por mes (anticipos, EdP, otros ingresos, IVA débito, costos por
+  proyecto, OC).
+- **Pasada 2** — IVA crédito/acumulado (arrastre secuencial `saldoIVAPrev`→`saldoContador`),
+  PPM (1% del mes anterior), impuesto a la renta (abril), tributos, CxP/CxC (con **CxC default**
+  para meses de proyección, factor 1.19, excluyendo Admin Delegada), aportes/devoluciones de
+  inversionistas, FC del mes.
+- **Pasada 3** — caja acumulada partiendo de `cajaInicialEfectiva`.
+
+**Desacople de React/storage**: el monolito resuelve dentro del `useMemo` los valores por
+proyecto/mes vía getters (`getAnticipoProy`, `getCostoProy`, `getIngresoProy`, `getOtrosIngProy`,
+`getOCProy`) que leen state/storage. En el port, esos valores **ya llegan resueltos** como
+funciones de entrada (`getAnticipo`/`getCosto`/`getIngreso`/`getOtrosIng`/`getOC`) sobre objetos
+planos; la matriz pura solo orquesta. Convenciones de signo idénticas al monolito (costos y OC
+entran positivos y la matriz los niega; IVA crédito/tributos negativos; saldo IVA negativo=crédito,
+positivo=deuda). **Sin divergencias** detectadas frente al monolito.
+
+Estado al 2026-06-10: **266 tests, 11 módulos, todo en verde** (rama `frente3-8-categorias`).

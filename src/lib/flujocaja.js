@@ -113,3 +113,130 @@ export function saldoIVADicFinal(saldosContadorPorMes) {
 export function arrastrarSaldoIVA(saldoIVADicFinalAnioActual) {
   return saldoIVADicFinalAnioActual || 0;
 }
+
+// ── MATRIZ DE FLUJO DE CAJA (port VERBATIM de cfRows) ─────────────────────────────
+// Port de la función `cfRows` del monolito (fase1_proyectos.html, componente
+// CashFlowModule, useMemo `cfRows`, ~L8435-8511). Replica EXACTAMENTE el cálculo en
+// 3 pasadas, los signos, constantes (0.19, 0.01), redondeos (ninguno: aritmética IEEE
+// directa) y el orden de evaluación. Montos en UF.
+//
+// DESACOPLE de React/storage: el monolito resuelve, dentro del useMemo, los valores
+// por proyecto/mes vía getters que leen state/storage (getAnticipoProy, getCostoProy,
+// getIngresoProy, getOtrosIngProy, getOCProy). Acá esos valores YA vienen resueltos en
+// objetos planos de entrada; la función pura solo orquesta las 3 pasadas. Así fija el
+// comportamiento financiero (IVA acumulado, tributos, CxC default, caja acumulada) sin
+// arrastrar la capa de datos.
+//
+// ENTRADA (objeto `input`):
+//   - activeProjects: [{ id, contractType }]  (contractType 'admin_delegada' marca AD)
+//   - getAnticipo(projectId, m): anticipo recibido + devolución del mes (con signo del monolito)
+//   - getCosto(projectId, m):    costo del proyecto en el mes (POSITIVO; la matriz lo niega)
+//   - getIngreso(projectId, m):  EdP neto del mes (POSITIVO)
+//   - getOtrosIng(m):            asesorías/otros ingresos del mes (POSITIVO)
+//   - getOC(m):                  costo Oficina Central del mes (POSITIVO; la matriz lo niega)
+//   - controlMonth:              mes de corte (los meses > controlMonth llevan CxC default)
+//   - cajaInicialEfectiva:       caja inicial de enero (manual / Balance / año anterior)
+//   - cfData: {
+//       pctIVACostos (?? 0.77), pctIVAOC (?? 0.05),
+//       saldoIVADicAnterior (?? 0),   // negativo=crédito a favor, positivo=deuda al SII
+//       impuestoRenta (?? 0),         // se aplica en abril (m===4), siempre como egreso
+//       cxp:{m}, cxc:{m},             // overrides; cxc cae a cxcDefault si null/undefined/0
+//       aportes:{m}, devoluciones:{m}
+//     }
+//
+// SALIDA: objeto `rows` indexado por mes 1..12, cada fila con los MISMOS campos que el
+// monolito (anticipos, edp, costos, totalAnticipos, totalEdp, otrosIng, totalIngresosOp,
+// ivaDebito, totalIngresos, totalCostos, oc, totalEgresos, ivaCredito, ivaNeto, ppm,
+// impRenta, totalTributos, cxp, cxc, cxcDefault, aportes, devoluciones, totalCxPCxC,
+// totalInv, fcMes, saldoContador, cajaInicial, cajaFinal).
+export function cfRowsMatrix(input) {
+  const {
+    activeProjects = [],
+    getAnticipo = () => 0,
+    getCosto = () => 0,
+    getIngreso = () => 0,
+    getOtrosIng = () => 0,
+    getOC = () => 0,
+    controlMonth = 0,
+    cajaInicialEfectiva = 0,
+    cfData = {},
+  } = input || {};
+
+  const rows = {};
+
+  // Pass 1: base rows (ingresos/egresos por mes).
+  // Monolito: secuencial 1..12; usa `prev` solo conceptualmente acá (no en pasada 1).
+  for (let m = 1; m <= 12; m++) {
+    const anticipos = {};
+    const edp = {};
+    const costos = {};
+    activeProjects.forEach(p => {
+      anticipos[p.id] = getAnticipo(p.id, m);
+      costos[p.id]    = -getCosto(p.id, m);
+      edp[p.id]       = getIngreso(p.id, m);
+    });
+    const totalAnticipos  = Object.values(anticipos).reduce((s, v) => s + v, 0);
+    const totalEdp        = Object.values(edp).reduce((s, v) => s + v, 0);
+    const otrosIng        = getOtrosIng(m);
+    const totalIngresosOp = totalAnticipos + totalEdp + otrosIng;   // Línea 8
+    const ivaDeb          = ivaDebito(totalIngresosOp);             // Línea 9 (incl. anticipos)
+    const totalIngresos   = totalIngresosOp + ivaDeb;
+    const totalCostos     = Object.values(costos).reduce((s, v) => s + v, 0);
+    const oc              = -getOC(m);
+    const totalEgresos    = totalCostos + oc;
+    rows[m] = {
+      anticipos, edp, costos, totalAnticipos, totalEdp, otrosIng, totalIngresosOp,
+      ivaDebito: ivaDeb, totalIngresos, totalCostos, oc, totalEgresos,
+    };
+  }
+
+  // Pass 2: tributos con IVA acumulado correcto, CxC default (secuencial).
+  const adProjs = activeProjects.filter(p => p.contractType === 'admin_delegada');
+  const pCostos = +(cfData.pctIVACostos ?? 0.77);
+  const pOC     = +(cfData.pctIVAOC     ?? 0.05);
+  let saldoIVAPrev = +(cfData.saldoIVADicAnterior || 0);
+  for (let m = 1; m <= 12; m++) {
+    const row  = rows[m];
+    const prev = m > 1 ? rows[m - 1] : null;
+    const ivaCred       = ivaCredito(row.totalCostos, row.oc, pCostos, pOC);
+    const ivaCredAc     = ivaCredAcum(saldoIVAPrev, ivaCred);
+    const saldoCont     = saldoContador(ivaCredAc, row.ivaDebito);
+    const ivaNeto       = ivaNetoMes(saldoIVAPrev);
+    const ppmMes        = prev ? ppm(prev.totalIngresosOp) : 0;
+    const impRenta      = m === 4 ? Math.abs(+(cfData.impuestoRenta || 0)) : 0;
+    const totalTributos = -(ivaNeto + ppmMes + impRenta);
+    // CxC default para meses de proyección: desfase de 1 mes en cobro (excluye AD).
+    let cxcDefault = 0;
+    if (m > controlMonth && prev) {
+      const adPrev = adProjs.reduce((s, p) => s + (prev.edp[p.id] || 0) + (prev.anticipos[p.id] || 0), 0);
+      const adCur  = adProjs.reduce((s, p) => s + (row.edp[p.id]  || 0) + (row.anticipos[p.id]  || 0), 0);
+      cxcDefault = (prev.totalIngresosOp - adPrev - (row.totalIngresosOp - adCur)) * 1.19;
+    }
+    const cxp = +(cfData.cxp?.[m] || 0);
+    const cxcRaw = cfData.cxc?.[m];
+    const cxc = (cxcRaw !== null && cxcRaw !== undefined && +cxcRaw !== 0) ? +cxcRaw : cxcDefault;
+    const aportes      = +(cfData.aportes?.[m] || 0);
+    const devoluciones = -(Math.abs(+(cfData.devoluciones?.[m] || 0)));
+    const totalCxPCxC  = cxp + cxc;
+    const totalInv     = aportes + devoluciones;
+    const fc = fcMes(row.totalIngresos, row.totalEgresos, ivaCred, totalTributos, totalCxPCxC, totalInv);
+    rows[m] = {
+      ...row,
+      ivaCredito: ivaCred, ivaNeto, ppm: ppmMes, impRenta, totalTributos,
+      cxp, cxc, cxcDefault, aportes, devoluciones, totalCxPCxC, totalInv,
+      fcMes: fc, saldoContador: saldoCont,
+    };
+    saldoIVAPrev = saldoCont;
+  }
+
+  // Pass 3: caja acumulada (parte desde la caja inicial efectiva).
+  let cajaAnt = cajaInicialEfectiva;
+  for (let m = 1; m <= 12; m++) {
+    const cajaInicial = cajaAnt;
+    const cajaFinalM  = cajaFinal(cajaInicial, rows[m].fcMes);
+    rows[m] = { ...rows[m], cajaInicial, cajaFinal: cajaFinalM };
+    cajaAnt = cajaFinalM;
+  }
+
+  return rows;
+}
