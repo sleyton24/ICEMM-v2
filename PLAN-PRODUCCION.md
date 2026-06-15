@@ -64,7 +64,7 @@ Para habilitar B sin reescribir ~100 call sites se introduce una **capa de persi
 
 | ✓ | Tarea | Archivos | Pri |
 |---|-------|----------|-----|
-| ☐ | **Rotar** la clave SQL `sleyton` en BNVSOFSQL; crear login solo-lectura (`db_datareader`). Tratar `20 Lyt 25$` como comprometida. Revisar logs del ERP. | SQL Server (fuera de repo) | P0 |
+| ☐ | **Rotar** la clave SQL `sleyton` en BNVSOFSQL; crear login solo-lectura (`db_datareader`). Tratar la clave actual como comprometida. Revisar logs del ERP. | SQL Server (fuera de repo) | P0 |
 | ☐ | Hacer **privado/eliminar** `github.com/sleyton24/ICEMM` y **purgar historial** (BFG/filter-repo sobre `a486311`) + force-push. | `ICEMM/.git` | P0 |
 | ☐ | Mover credenciales a **variables de entorno** (`.env` no commiteado) en los 3 scripts Python; usar la clave nueva. | `informe_lq.py:13-18`, `exportar_detalle.py:15-24`, `exportar_movimientos.py:17-26` | P0 |
 | ☐ | Eliminar el directorio fantasma `ICEMM/icemm~/` y el `.git` anidado. | `ICEMM/icemm~/`, `ICEMM/.git` | P0 |
