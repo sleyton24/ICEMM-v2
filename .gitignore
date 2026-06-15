@@ -20,3 +20,9 @@ dist/
 # exportar_*.py), un .git anidado y una copia duplicada icemm~/. No commitear hasta
 # decidir cómo versionarlo (rotar clave, mover a .env, quitar .git anidado + icemm~/).
 ICEMM/
+
+# Ejecutable del launcher (se regenera desde "Abrir App ICEMM.ps1" con ps2exe).
+*.exe
+
+# Config local de Claude con rutas específicas de la máquina (no compartir).
+.claude/settings.json
