@@ -2295,17 +2295,40 @@ function AnnualBudget({ year, projects }) {
         const wb = XLSX.read(ev.target.result, { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-        // Matchea la 1ª columna por: nombre de cuenta (sin acentos), código OC (907, 901...) o id.
+        // Alias de nombres abreviados (los que trae la plantilla real template_OC). Todos se
+        // normalizan (minúsculas/sin acentos) al compararse. Mapea variante -> id de OC_CATS.
+        const OC_ALIASES = {
+          back_office:        ['back office / servicios', 'back office servicios', 'back office'],
+          rrhh:               ['recursos humanos'],
+          marketing:          ['marketing y ventas'],
+          software_redes:     ['software y redes', 'uso de softwares y redes'],
+          cuentas_servicio:   ['cuentas de servicio'],
+          gastos_gral_of:     ['gg oficina', 'gastos generales oficina'],
+          arriendo_oficinas:  ['arriendo oficinas'],
+          costos_financieros: ['costos financieros'],
+          costos_legales:     ['costos legales'],
+          arriendo_bodega:    ['arriendo bodega central', 'arriendos bodega central'],
+          asesorias:          ['asesorias / consultorias', 'asesorias - consultorias - proyectos', 'asesorias consultorias'],
+          directorio:         ['directorio'],
+          post_venta_oc:      ['post venta oc', 'costos de post venta'],
+          dev_capital:        ['dev. capital de trabajo', 'dev capital de trabajo', 'devolucion de capital de trabajo'],
+          incentivos:         ['politica de incentivos', 'politica de incentivos of central'],
+          otros_oc:           ['otros'],
+        };
+        // Matchea la 1ª columna por: nombre completo, alias abreviado, código OC (907...) o id.
         const byLabel = Object.fromEntries(OC_CATS.map(c => [norm(c.label), c.id]));
         const byId    = Object.fromEntries(OC_CATS.map(c => [norm(c.id), c.id]));
         const byCode  = Object.fromEntries(OC_PLAN.filter(p => p.concepto).map(p => [String(p.concepto).trim(), p.catId]));
+        const byAlias = {};
+        Object.entries(OC_ALIASES).forEach(([id, arr]) => arr.forEach(a => { byAlias[norm(a)] = id; }));
         const newOC = { ...budget.oficinaCentral };
         let matched = 0;
         const unmatched = [];
         data.slice(1).forEach(row => {
           const key0 = String(row[0] ?? '').trim();
           if (!key0) return; // fila en blanco
-          const catId = byLabel[norm(key0)] || byCode[key0] || byId[norm(key0)];
+          const nk = norm(key0);
+          const catId = byLabel[nk] || byAlias[nk] || byCode[key0] || byId[nk];
           if (!catId) { unmatched.push(key0); return; }
           newOC[catId] = Array(12).fill(0).map((_, i) => parseNum(row[i + 1]));
           matched++;
