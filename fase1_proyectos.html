@@ -2273,26 +2273,52 @@ function AnnualBudget({ year, projects }) {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
+    // Normaliza texto: minúsculas, sin acentos, espacios colapsados (match tolerante).
+    const norm = s => String(s ?? '').toLowerCase().normalize('NFD').replace(new RegExp('[\\u0300-\\u036f]', 'g'), '').replace(/\s+/g, ' ').trim();
+    // Parseo numérico tolerante (formato chileno 1.234,56 y estándar 1,234.56 / 1234.56).
+    const parseNum = (v) => {
+      let s = String(v ?? '').trim().replace(/[^\d.,\-]/g, '');
+      if (!s) return 0;
+      if (s.includes('.') && s.includes(',')) {
+        s = (s.lastIndexOf(',') > s.lastIndexOf('.'))
+          ? s.replace(/\./g, '').replace(',', '.')   // 1.234,56 -> 1234.56
+          : s.replace(/,/g, '');                      // 1,234.56 -> 1234.56
+      } else if (s.includes(',')) {
+        s = s.replace(',', '.');                       // 1234,56 -> 1234.56
+      }
+      const n = parseFloat(s);
+      return isNaN(n) ? 0 : n;
+    };
     const reader = new FileReader();
     reader.onload = ev => {
       try {
         const wb = XLSX.read(ev.target.result, { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-        // Row 0 = header, rows 1..16 = OC_CATS (matched by label)
-        const labelToId = Object.fromEntries(OC_CATS.map(c => [c.label.toLowerCase().trim(), c.id]));
+        // Matchea la 1ª columna por: nombre de cuenta (sin acentos), código OC (907, 901...) o id.
+        const byLabel = Object.fromEntries(OC_CATS.map(c => [norm(c.label), c.id]));
+        const byId    = Object.fromEntries(OC_CATS.map(c => [norm(c.id), c.id]));
+        const byCode  = Object.fromEntries(OC_PLAN.filter(p => p.concepto).map(p => [String(p.concepto).trim(), p.catId]));
         const newOC = { ...budget.oficinaCentral };
+        let matched = 0;
+        const unmatched = [];
         data.slice(1).forEach(row => {
-          const lbl = String(row[0] || '').toLowerCase().trim();
-          const catId = labelToId[lbl];
-          if (!catId) return;
-          const vals = Array(12).fill(0).map((_, i) => {
-            const raw = String(row[i + 1] || '').replace(',', '.').replace(/[^\d.\-]/g, '');
-            return parseFloat(raw) || 0;
-          });
-          newOC[catId] = vals;
+          const key0 = String(row[0] ?? '').trim();
+          if (!key0) return; // fila en blanco
+          const catId = byLabel[norm(key0)] || byCode[key0] || byId[norm(key0)];
+          if (!catId) { unmatched.push(key0); return; }
+          newOC[catId] = Array(12).fill(0).map((_, i) => parseNum(row[i + 1]));
+          matched++;
         });
         setBudget(prev => ({ ...prev, oficinaCentral: newOC }));
+        let msg = `Oficina Central: se cargaron ${matched} de ${OC_CATS.length} cuentas.`;
+        if (unmatched.length) {
+          msg += `\n\nNo se reconocieron estas filas (la 1ª columna debe ser el NOMBRE de la cuenta como en la plantilla, o su código):\n• ` + unmatched.slice(0, 20).join('\n• ');
+        }
+        if (matched === 0) {
+          msg += `\n\nSugerencia: usá "Descargar plantilla OC", copiá tus montos en esa planilla y subí ese archivo.`;
+        }
+        alert(msg);
       } catch (err) {
         alert('Error al leer el archivo: ' + err.message);
       }
