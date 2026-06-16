@@ -1,0 +1,90 @@
+# Deploy al VPS — Estrategia B (datos compartidos en PostgreSQL) + HTTPS + acceso restringido
+
+> Objetivo: el monolito servido en el VPS existente, **conectado a la base PostgreSQL de ICEMM**
+> (datos compartidos en vivo), por **HTTPS** y con **acceso restringido**. Multi-etapa, con
+> dependencias. **[YO]** = lo hago en código acá; **[VOS]** = lo corrés en el VPS (no tengo acceso).
+> Base: [CONEXION-POSTGRESQL.md](CONEXION-POSTGRESQL.md) y [ARQUITECTURA-DATOS.md](ARQUITECTURA-DATOS.md).
+
+## Regla de oro
+**No migrar datos a la base compartida hasta que estén recuperados y cuadrados con los Excel.**
+La base pasa a ser la "fuente de verdad" multi-usuario; si entra incompleta, todos ven datos malos.
+
+---
+
+## Fase 0 — Datos correctos primero  `[VOS + YO]`
+1. **Diagnóstico** (vos, consola del navegador): correr el snippet de recuperación → saber qué proyectos/actuals/respaldos hay.
+2. **Recuperar** lo que falte (catálogo desde respaldo `budget-control:backup:*` o re-entrada; datos pesados desde los Excel).
+3. **Cuadrar** con los Excel (Reporte Manager 16.644,79 UF · Mayor $491.082.321 · Balance −$175.229.402) y resolver los 3 fixes de reconciliación (costos de venta, doble EBITDA, conversión UF).
+> Sin esto, las fases 3+ migran basura. Se puede hacer en paralelo con la Fase 1.
+
+## Fase 1 — Backend ICEMM en el VPS, endurecido  `[VOS, con artefactos míos]`
+Ya está preparado (sin commitear) en `ICEMM/backend`: 16 tablas nuevas en el schema + 12 route files + hardening.
+En el VPS:
+1. Traer el código del backend (git pull en el repo de ICEMM del VPS, o copiar los archivos preparados).
+2. `.env`: `BETA_MODE=false`, `JWT_SECRET` aleatorio ≥32 chars, `CORS_ORIGIN=https://<dominio-del-monolito>`.
+3. Crear admin real: `cd backend && npm run seed:user` (ANTES de cerrar beta, para no quedar bloqueado).
+4. **Migrar la base** (crea las 16 tablas, NO toca las de ICEMM): `npx prisma migrate deploy` (o `migrate dev --name add_monolito_tables` la primera vez). Ver `ICEMM/backend/prisma/MONOLITO-TABLAS.md`.
+5. `npm run build && pm2 restart icemm-api` (o equivalente). Verificar `GET /health` y `GET /api/projects` con token.
+
+## Fase 2 — Cablear el `dataStore` en el monolito  `[YO]`
+Hoy el `dataStore` está como esqueleto inactivo (flag `window.ICEMM_BACKEND='local'`). Falta:
+1. Redefinir `storage.get/set` para leer/escribir un **caché en memoria** hidratado al arranque (mantiene los ~150 call sites síncronos sin reescribirlos).
+2. Hidratación async al bootstrap: precargar del API las claves del año/contexto activo.
+3. `ApiBackend` write-behind (cola/outbox) + concurrencia optimista para cierres.
+> Se hace **después** de la Fase 1 (necesita el backend vivo para validarlo de verdad). Riesgoso: cambia el corazón de la persistencia → se prueba con smoke test antes de activar.
+
+## Fase 3 — Migrar tus datos a la base  `[YO + VOS]`
+1. Export del `localStorage` actual (menú → Respaldar, o `collectAllData`) — **ya recuperado y cuadrado** (Fase 0).
+2. `POST /api/sync/import` sube ese JSON y lo upsertea en las 16 tablas (endpoint ya implementado).
+3. Validar: comparar totales en la base vs los Excel (Check Contable contra el balance).
+
+## Fase 4 — Servir el monolito en Nginx + HTTPS + acceso restringido  `[VOS, con mi config]`
+1. Subir `fase1_proyectos.html` al VPS (git pull del repo `ICEMM-v2` con deploy key/token, o scp).
+2. Nginx: nuevo `server`/`location` que sirve el HTML, con **TLS** (certbot) y **acceso restringido**
+   (auth_basic, lista de IPs, o VPN). Mismo origen que `/api` para evitar CORS y permitir cookie httpOnly.
+3. Template de Nginx (ajustar dominio):
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name gestion.icemm.<tu-dominio>;     # subdominio del monolito
+
+    ssl_certificate     /etc/letsencrypt/live/gestion.icemm.<tu-dominio>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gestion.icemm.<tu-dominio>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # ── Acceso restringido (elegí UNO) ──
+    # (a) Usuario/clave a nivel servidor (htpasswd):
+    auth_basic "ICEMM - acceso restringido";
+    auth_basic_user_file /etc/nginx/.htpasswd-icemm;
+    # (b) o por IP:  allow 200.x.x.x;  deny all;
+
+    root /var/www/icemm-gestion;                  # donde quede fase1_proyectos.html
+    location / { try_files /fase1_proyectos.html =404; }
+
+    # API en el MISMO origen (sin CORS): proxy a la app de ICEMM
+    location /api/ { proxy_pass http://127.0.0.1:3001; proxy_set_header Host $host; }
+}
+# Redirect 80 → 443
+server { listen 80; server_name gestion.icemm.<tu-dominio>; return 301 https://$host$request_uri; }
+```
+- `htpasswd -c /etc/nginx/.htpasswd-icemm <usuario>` para la auth básica.
+- `sudo certbot --nginx -d gestion.icemm.<tu-dominio>` para el TLS.
+
+## Fase 5 — Activar y verificar  `[YO + VOS]`
+1. Flip `window.ICEMM_BACKEND='api'` (feature flag) — empezar con un usuario piloto, localStorage como caché/fallback.
+2. Smoke test: login (JWT del backend), ver proyectos/actuals desde la base, cerrar un mes (transacción server-side).
+3. Verificar cuadre (Check Contable) contra los Excel.
+4. Rollback si algo falla: volver el flag a `'local'` (sigue andando con localStorage).
+
+---
+
+## Qué falta confirmar (vos)
+- **Dominio/subdominio** para el monolito (ej. `gestion.icemm.tudominio.cl`). El VPS hoy es IP plana `187.127.29.98`; para TLS conviene un dominio.
+- **Método de restricción**: auth_basic (usuario/clave) vs lista de IPs vs VPN.
+- Cómo trae el VPS el repo privado `ICEMM-v2` (deploy key SSH — tenés `sanvest_deploy` — o token).
+
+## Estado de preparación (al 2026-06-16)
+- ✅ Schema Prisma (16 tablas) + endpoints REST (compilan) + dataStore skeleton + KEY_REGISTRY.
+- ⏳ Falta: Fase 0 (datos), Fase 2 (cablear dataStore), Fase 3 (migración), Fase 4 (Nginx/TLS), Fase 5 (activar).
