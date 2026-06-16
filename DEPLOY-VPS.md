@@ -88,3 +88,52 @@ server { listen 80; server_name gestion.icemm.<tu-dominio>; return 301 https://$
 ## Estado de preparación (al 2026-06-16)
 - ✅ Schema Prisma (16 tablas) + endpoints REST (compilan) + dataStore skeleton + KEY_REGISTRY.
 - ⏳ Falta: Fase 0 (datos), Fase 2 (cablear dataStore), Fase 3 (migración), Fase 4 (Nginx/TLS), Fase 5 (activar).
+
+---
+
+## Implementación concreta en TU VPS (Ubuntu 24.04 · Nginx · PM2 · Postgres local)
+Datos confirmados: subdominio libre **`gestion.187.127.29.98.nip.io`**; backend ICEMM en
+`/var/www/icemm/backend` (PM2 `icemm-api`, **:3001**, 21 días up); base **`icemm`** (Postgres 16 local,
+user `icemm`, schema public); certbot instalado; deploy manual (copia/build + PM2 + Nginx).
+
+### Bloque A — App estática online  (SEGURO, NO toca ICEMM — da la URL ya)
+```bash
+# como root en el VPS
+mkdir -p /var/www/icemm-gestion
+# subir fase1_proyectos.html (+ el logo si lo referencia) a /var/www/icemm-gestion/
+#   opción git: git clone git@github.com:sleyton24/ICEMM-v2.git /tmp/icemm-v2 (deploy key) && cp /tmp/icemm-v2/fase1_proyectos.html /var/www/icemm-gestion/
+#   opción copia: rsync/scp desde tu PC
+cp deploy/nginx-gestion.conf /etc/nginx/sites-available/gestion
+ln -s /etc/nginx/sites-available/gestion /etc/nginx/sites-enabled/gestion
+command -v htpasswd || apt-get install -y apache2-utils
+htpasswd -c /etc/nginx/.htpasswd-gestion gerencia      # crea el usuario "gerencia" (te pide clave)
+nginx -t && systemctl reload nginx
+certbot --nginx -d gestion.187.127.29.98.nip.io        # TLS + redirect 80→443
+```
+→ Queda **https://gestion.187.127.29.98.nip.io** con usuario/clave. **Datos aún por-navegador** hasta el Bloque B + wiring.
+
+### Bloque B — 16 tablas + endpoints del monolito en la base `icemm`  (CUIDADO: toca el ICEMM vivo)
+> ⚠️ Cambios ADITIVOS, pero con **backup + rollback** y test inmediato. NO traer la versión endurecida de
+> `auth.ts` (fail-fast de `JWT_SECRET`) salvo que el `.env` del VPS ya tenga un `JWT_SECRET` ≥32 chars —
+> si no, el backend no arranca y se cae ICEMM.
+```bash
+cd /var/www/icemm/backend
+cp -r dist dist.bak-$(date +%F)            # rollback instantáneo
+# Traer SOLO lo aditivo del monolito (lista abajo) a src/ y prisma/
+npx prisma generate
+npx prisma migrate deploy                  # crea las 16 tablas en la base icemm (additivo)
+npm run build && pm2 restart icemm-api
+curl -s localhost:3001/health              # ¿ICEMM sigue OK?
+pm2 logs icemm-api --lines 30
+# ROLLBACK: rm -rf dist && mv dist.bak-AAAA-MM-DD dist && pm2 restart icemm-api
+```
+Archivos a traer (en `ICEMM/backend/`): `prisma/schema.prisma` (extendido) + `src/routes/{budgetAnnual,actuals,
+erpSource,projection,cashflow,obras,moduleSnapshot,cierres,savedReports,config,sync}.ts` (nuevos) + `src/index.ts`
+(registra los routers) + `src/routes/projects.ts` (DTO extendido, aditivo).
+
+> 🔧 Para que el Bloque B NO rompa ICEMM, necesito ver tu **backend VIVO** del VPS:
+> `/var/www/icemm/backend/src/index.ts` y `/var/www/icemm/backend/prisma/schema.prisma`. Así te doy un
+> **merge exacto** (solo agregar lo del monolito) en vez de un overwrite a ciegas que podría diferir del vivo.
+
+### Después del Bloque B (lo hago yo):
+Fase 2 (cablear dataStore → datos compartidos) · Fase 3 (migrar datos por `/api/sync/import`) · activar flag `api` + verificar cuadre.
