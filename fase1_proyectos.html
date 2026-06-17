@@ -10904,9 +10904,12 @@ function hashPass(s) {
 }
 
 function defaultUsers() {
+  // SIN contraseña embebida en el código (antes se servía hashPass('icemm') visible en el
+  // fuente). El admin se crea SIN passHash; en el primer ingreso se define la contraseña.
+  // La auth "de verdad" (server-side, bcrypt+JWT) llega con el cableado al backend gestion-api.
   return [
     { id:'usr-admin', username:'esolar', name:'Esteban Solar', role:'admin',
-      passHash: hashPass('icemm'), modules: [...ALL_MODULE_IDS], active: true },
+      passHash: '', modules: [...ALL_MODULE_IDS], active: true },
   ];
 }
 
@@ -11258,7 +11261,11 @@ function obrasAnyData(monthObj) {
 
 // ─── LOGIN ────────────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
-  const [username, setUsername] = useState('');
+  // Primer uso: si solo existe el admin semilla SIN contraseña, hay que crearla
+  // (no se embebe ninguna clave en el código fuente).
+  const seedAdmin = (() => { const us = loadUsers(); return (us.length === 1 && !us[0].passHash) ? us[0] : null; })();
+  const setupMode = !!seedAdmin;
+  const [username, setUsername] = useState(seedAdmin ? seedAdmin.username : '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
@@ -11268,6 +11275,15 @@ function LoginScreen({ onLogin }) {
     const u = users.find(x => x.username.toLowerCase() === username.trim().toLowerCase());
     if (!u) { setError('Usuario no encontrado'); return; }
     if (!u.active) { setError('Usuario inactivo. Contacte al administrador.'); return; }
+    if (!u.passHash) {
+      // Primer ingreso: el usuario DEFINE su contraseña (no venía ninguna en el código).
+      if (password.length < 4) { setError('Definí una contraseña de al menos 4 caracteres.'); return; }
+      const nuevo = { ...u, passHash: hashPass(password) };
+      saveUsers(users.map(x => x.id === u.id ? nuevo : x));
+      setError('');
+      onLogin(nuevo);
+      return;
+    }
     if (u.passHash !== hashPass(password)) { setError('Contraseña incorrecta'); return; }
     setError('');
     onLogin(u);
@@ -11280,7 +11296,8 @@ function LoginScreen({ onLogin }) {
         <div className="flex flex-col items-center gap-1 mb-1">
           <div className="w-12 h-1.5 rounded-full mb-3" style={{background:'#D01030'}} />
           <h1 className="text-lg font-bold text-gray-900">Control Presupuestario</h1>
-          <p className="text-[11px] text-gray-400 uppercase tracking-widest font-semibold">ICEMM · Iniciar sesión</p>
+          <p className="text-[11px] text-gray-400 uppercase tracking-widest font-semibold">{setupMode ? 'ICEMM · Primer uso' : 'ICEMM · Iniciar sesión'}</p>
+          {setupMode && <p className="text-[11px] text-amber-600 text-center mt-1">Primer ingreso: definí la contraseña del administrador.</p>}
         </div>
         <label className="flex flex-col gap-1">
           <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Usuario</span>
@@ -11297,7 +11314,7 @@ function LoginScreen({ onLogin }) {
         {error && <div className="text-[11px] text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</div>}
         <button type="submit"
           className="mt-1 bg-[#D01030] text-white text-sm font-semibold rounded-lg py-2.5 hover:bg-[#b00d28] transition-colors">
-          Ingresar
+          {setupMode ? 'Crear contraseña y entrar' : 'Ingresar'}
         </button>
         <p className="text-[10px] text-gray-300 text-center mt-1">Acceso restringido al personal autorizado de ICEMM</p>
       </form>
