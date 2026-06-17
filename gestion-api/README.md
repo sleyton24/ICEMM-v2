@@ -50,11 +50,15 @@ npm run dev                 # tsx watch en :3002
 ## Deploy en el VPS
 
 ```bash
-# 1) Postgres: crear base y usuario dedicados
-sudo -u postgres psql <<'SQL'
+# 1) Postgres: usar la MISMA base de ICEMM ("icemm") en un SCHEMA aparte "gestion".
+#    NO se crea base nueva; el schema "public" de ICEMM no se toca.
+sudo -u postgres psql -d icemm <<'SQL'
+CREATE SCHEMA IF NOT EXISTS gestion;
 CREATE USER gestion WITH PASSWORD 'CAMBIAR_CLAVE';
-CREATE DATABASE gestion OWNER gestion;
+GRANT USAGE, CREATE ON SCHEMA gestion TO gestion;
+ALTER DEFAULT PRIVILEGES IN SCHEMA gestion GRANT ALL ON TABLES TO gestion;
 SQL
+# DATABASE_URL en .env: postgresql://gestion:CLAVE@localhost:5432/icemm?schema=gestion
 
 # 2) Copiar la carpeta gestion-api/ al VPS (sin node_modules/dist/.env)
 #    p.ej. con rsync o git archive.

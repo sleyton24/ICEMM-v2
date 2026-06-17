@@ -140,25 +140,32 @@ Fase 2 (cablear dataStore → datos compartidos) · Fase 3 (migrar datos por `/a
 
 ---
 
-## ✅ DEPLOY DEFINITIVO — Stack independiente (NO toca ICEMM) ← USAR ESTE (reemplaza el Bloque B de arriba)
+## ✅ DEPLOY DEFINITIVO — Backend propio en la base `icemm` (schema aparte `gestion`, NO toca las tablas de ICEMM) ← USAR ESTE
 Decisión: **no se toca ICEMM**. El monolito va con su propio stack al lado.
 
 | | ICEMM (intacto) | Monolito (nuevo) |
 |--|--|--|
 | Proceso PM2 | `icemm-api` :3001 | **`gestion-api` :3002** |
 | Código | `/var/www/icemm` | **`/var/www/gestion-api`** (carpeta `gestion-api/` del repo) |
-| Base Postgres | `icemm` | **`gestion`** (nueva, mismo server) |
+| Base Postgres | base `icemm` · schema `public` | **misma base `icemm`** · schema **`gestion`** |
 | Nginx | sites actuales | site nuevo `gestion.187.127.29.98.nip.io` |
 
-> "Datos compartidos" = **todos los usuarios del monolito ven la misma base `gestion`** (multi-usuario real).
-> NO es la base de ICEMM (por eso no la tocamos). Si más adelante el monolito necesita LEER datos de ICEMM,
-> se agrega lectura cross-DB sin escribir en lo de ICEMM.
+> "Datos compartidos" = **todos los usuarios del monolito ven los mismos datos** (multi-usuario real),
+> guardados EN la base **`icemm`** pero en un **schema aparte `gestion`** → las tablas de ICEMM (`public`) NO se tocan.
+> Si más adelante el monolito necesita LEER datos reales de ICEMM (CargaERP, etc.), se agrega lectura cross-schema (solo lectura).
 
 Pasos en el VPS (detalle en `gestion-api/README.md`):
-1. **Base aislada:** `sudo -u postgres psql -c "CREATE USER gestion WITH PASSWORD '<clave>';"` + `... "CREATE DATABASE gestion OWNER gestion;"`
-2. **Backend propio:** copiar `gestion-api/` → `/var/www/gestion-api` · `npm ci` · `cp .env.example .env` (completar `DATABASE_URL` de `gestion`, `JWT_SECRET` aleatorio ≥32, `CORS_ORIGIN`) · `npx prisma migrate deploy` (o `prisma db push`) · `npm run build` · `npm run seed:user -- --email=... --password='...' --rol=admin` · `pm2 start ecosystem.config.cjs && pm2 save` · `curl localhost:3002/health`.
+1. **Schema aislado dentro de la base `icemm`** (NO se crea base nueva; el schema `public` de ICEMM no se toca):
+   ```bash
+   sudo -u postgres psql -d icemm -c "CREATE SCHEMA IF NOT EXISTS gestion;"
+   sudo -u postgres psql -d icemm -c "CREATE USER gestion WITH PASSWORD '<clave>';"
+   sudo -u postgres psql -d icemm -c "GRANT USAGE, CREATE ON SCHEMA gestion TO gestion;"
+   sudo -u postgres psql -d icemm -c "ALTER DEFAULT PRIVILEGES IN SCHEMA gestion GRANT ALL ON TABLES TO gestion;"
+   ```
+   (El usuario `gestion` solo toca el schema `gestion`; sin acceso a `public`/ICEMM.)
+2. **Backend propio:** copiar `gestion-api/` → `/var/www/gestion-api` · `npm ci` · `cp .env.example .env` (completar `DATABASE_URL` → base `icemm`/schema `gestion`, `JWT_SECRET` aleatorio ≥32, `CORS_ORIGIN`) · `npx prisma migrate deploy` (o `prisma db push` — crea las tablas SOLO en el schema `gestion`) · `npm run build` · `npm run seed:user -- --email=... --password='...' --rol=admin` · `pm2 start ecosystem.config.cjs && pm2 save` · `curl localhost:3002/health`.
 3. **App + Nginx:** Bloque A de arriba (sube `fase1_proyectos.html` + `deploy/nginx-gestion.conf` + htpasswd + certbot). El config ya proxya `/api` → **:3002**.
 4. **ICEMM:** cero cambios. Si `gestion-api` falla, ICEMM ni se entera.
 
 ### Después (lo hago yo)
-Fase 2: cablear el `dataStore` del monolito a `/api` (datos compartidos en `gestion`). Fase 3: migrar tus datos (`/api/sync/import`). Activar flag `api` + verificar cuadre.
+Fase 2: cablear el `dataStore` del monolito a `/api` (datos compartidos en la base `icemm`/schema `gestion`). Fase 3: migrar tus datos (`/api/sync/import`). Activar flag `api` + verificar cuadre.
