@@ -1,0 +1,461 @@
+// Plan de cuentas, productos, proyectos, archivos y ERP de ICEMM.
+// JSON columns para los blobs grandes (partidas itemizadas, transacciones ERP).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String        @id @default(uuid())
+  email         String        @unique
+  passwordHash  String
+  nombre        String
+  rol           String        @default("viewer") // "admin" | "editor" | "viewer"
+  activo        Boolean       @default(true)
+  fechaCreacion DateTime      @default(now())
+  proyectos     UserProject[]
+
+  // ── Relaciones inversas del monolito (ver MONOLITO-TABLAS.md). Solo inversas de FK; no cambian la semántica de User. ──
+  actualsCargados      Actuals[]
+  erpSourcesCargadas   ErpSource[]
+  overridesEditados    Overrides[]
+  cashflowsEditados    CashFlow[]
+  controlObrasEditados ControlObras[]
+  cierresRealizados    Cierre[]
+  savedReports         SavedReport[]
+  auditLogs            AuditLog[]
+}
+
+/// Many-to-many: qué proyectos puede ver cada usuario (no aplica a admin, que ve todos).
+model UserProject {
+  userId          String
+  projectId       String
+  fechaAsignacion DateTime @default(now())
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([userId, projectId])
+  @@index([projectId])
+}
+
+// ── Plan de cuentas (global, no per-project) ─────────────────────────────────
+
+model PlanCuentas {
+  id        String   @id @default(uuid())
+  version   String
+  origen    String // "bundled" | "uploaded"
+  familias  Json // FamiliaMacro[]
+  cuentas   Json // CuentaCosto[]
+  cargadoEn DateTime @default(now())
+  // Solo el plan activo se marca con `activo = true`; los anteriores quedan como histórico.
+  activo    Boolean  @default(false)
+}
+
+model MaestroProductos {
+  id        String   @id @default(uuid())
+  version   String
+  origen    String
+  productos Json // ProductoMaestro[]
+  cargadoEn DateTime @default(now())
+  activo    Boolean  @default(false)
+}
+
+// ── Proyectos ────────────────────────────────────────────────────────────────
+
+model Project {
+  id                  String           @id @default(uuid())
+  nombre              String
+  unidadNegocioCodigo Int?
+  cutoffMesReal       String? // "YYYY-MM"
+  fechaCreacion       DateTime         @default(now())
+  fechaActualizacion  DateTime         @updatedAt
+  archivos            ArchivoCargado[]
+  erp                 CargaERP?
+  informes            Informe[]
+  usuarios            UserProject[]
+  comentarios         Comentario[]
+
+  // ── Relaciones inversas del monolito (ver MONOLITO-TABLAS.md). Solo inversas de FK; no cambian la semántica de Project. ──
+  gestion          ProjectGestion?
+  budgetByCategory BudgetByCategory[]
+  projCompletions  ProjCompletion[]
+  controlObras     ControlObras[]
+  plazoCurvas      PlazoCurvas[]
+  reemplazadoPor   ProjectGestion[]   @relation("ProjectReemplazo")
+}
+
+/// Comentarios libres asociados a una partida (codigo) de un proyecto.
+model Comentario {
+  id            String   @id @default(uuid())
+  projectId     String
+  codigoPartida String // codigo de la partida (M10100001, S30566773, etc.) o codigo2 (cuenta)
+  contenido     String
+  autorEmail    String
+  autorNombre   String
+  fechaCreacion DateTime @default(now())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, codigoPartida])
+}
+
+/// Snapshot inmutable de un proyecto en un momento dado.
+/// El "informe activo" (en borrador) son los archivos del Project directamente.
+/// Una vez aprobado, se serializa todo en `snapshotProyecto` y queda read-only.
+model Informe {
+  id               String   @id @default(uuid())
+  projectId        String
+  numero           Int // 1, 2, 3 ... auto-incremental por proyecto
+  estado           String   @default("aprobado") // siempre 'aprobado' (los borradores viven en Project)
+  fechaCreacion    DateTime @default(now())
+  fechaAprobacion  DateTime @default(now())
+  aprobadoPor      String // email del user
+  comentario       String?
+  /// Snapshot completo: { slots, partidas?, ventas, fechaCorte, ... }
+  snapshotProyecto Json
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, numero])
+  @@index([projectId])
+}
+
+model ArchivoCargado {
+  id                String   @id @default(uuid())
+  projectId         String
+  // "presupuesto_original" | "presupuesto_redistribuido" | "ppto_horas_extra" | "proyectado"
+  slot              String
+  nombreArchivo     String
+  fechaCarga        DateTime @default(now())
+  partidas          Json // PartidaRaw[]
+  subtotalesFamilia Json
+  totalGeneral      Float
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, slot])
+  @@index([projectId])
+}
+
+model CargaERP {
+  id                       String   @id @default(uuid())
+  projectId                String   @unique
+  nombreArchivo            String
+  unidadNegocioCodigo      Int
+  unidadNegocioDescripcion String
+  totalUF                  Float
+  numTransacciones         Int
+  rangoFechaDesde          DateTime
+  rangoFechaHasta          DateTime
+  agregadoPorCcosto        Json
+  agregadoPorCcostoPorMes  Json
+  mesesDisponibles         String[]
+  transaccionesPorCcosto   Json // ← más pesado; mover a tabla aparte si crece
+  fechaCarga               DateTime @default(now())
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  TABLAS DEL MONOLITO (control presupuestario "budget-control:*")           ║
+// ║  Extienden el backend de ICEMM SIN tocar los modelos de arriba.           ║
+// ║  Ancla = Project (unidadNegocioCodigo Int == unCode '02' del monolito).   ║
+// ║  Montos en UF (Float). Datos mensuales 1..12 como Json salvo indicado.    ║
+// ║  Ver prisma/MONOLITO-TABLAS.md para el mapeo clave localStorage->tabla.   ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// ── Catálogo / maestro de gestión ────────────────────────────────────────────
+
+/// Extensión 1:1 de Project con los campos ricos del monolito (budget-control:projects[*]).
+/// Los datos por categoría y las curvas se separan; aquí van contrato, estado y curvas blob.
+model ProjectGestion {
+  projectId          String    @id // == Project.id; 1:1 (la PK ES la FK)
+  contractType       String // "suma_alzada" | "admin_delegada"
+  status             String    @default("presupuestado") // "presupuestado"|"en_ejecucion"|"terminado"
+  isOffBudget        Boolean   @default(false)
+  startDate          DateTime? @db.Date // 'YYYY-MM' en el monolito; se modela como fecha
+  endDate            DateTime? @db.Date
+  durationMonths     Int?
+  /// Otro Project al que este reemplaza (replacesProject). Self-FK vía Project. Validar ciclos en app.
+  replacesProject    String?
+  /// contract.* según tipo. SA:{costDirectoGG,gastoGeneralOC,utilidadEstudiada,provisionPostVenta,originalAmount,advancePercent,retentionPercent,extraordinaryWorks[]}
+  /// AD:{cashAdvance,monthlyGG,monthlyFee,totalBudgetedCost,provisionPostVenta}. Todo UF.
+  contract           Json
+  costCurve          Json // number[] (% por mes, suma 100)
+  revenueCurve       Json // number[] (% por mes, suma 100)
+  schemaVersion      Int       @default(2)
+  fechaCreacion      DateTime  @default(now())
+  fechaActualizacion DateTime  @updatedAt
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reemplazado Project? @relation("ProjectReemplazo", fields: [replacesProject], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([isOffBudget])
+  @@index([replacesProject])
+}
+
+/// Presupuesto por proyecto y categoría de costo (8 cats). Normaliza el blob budgetByCategory.
+/// budget-control:projects[*].budgetByCategory{8 cats}.
+model BudgetByCategory {
+  id                 String   @id @default(uuid())
+  projectId          String
+  /// "materiales"|"mano_de_obra"|"subcontratos"|"gastos_generales"|"equipos_maquinarias"|"otros"|"edificaciones_comerciales"|"post_venta"
+  categoria          String
+  /// Float[12] (UF). El monolito guarda un total por categoría; el desglose mensual se deriva con costCurve.
+  montosMensuales    Json
+  fechaActualizacion DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, categoria])
+  @@index([projectId])
+}
+
+// ── Presupuesto anual ────────────────────────────────────────────────────────
+
+/// Presupuesto anual de Oficina Central + otros ingresos (asesorías). budget-control:budget:{year}.
+model BudgetAnnual {
+  id             String    @id @default(uuid())
+  year           Int       @unique
+  status         String    @default("borrador") // "borrador" | "fijado"
+  fixedDate      DateTime? @db.Timestamptz(6)
+  oficinaCentral Json // {[ocCat]: Float[12]} (UF)
+  otherIncome    Json // {asesorias: Float[12]} (UF)
+  /// Baseline inmutable congelado al fijar: {[projId]:{monthlyRevenue[12],monthlyCosts:{[cat]:[12]}}}. Null en borrador.
+  snapshot       Json?
+  schemaVersion  Int       @default(2)
+  updatedAt      DateTime  @updatedAt
+}
+
+// ── Real / ERP ───────────────────────────────────────────────────────────────
+
+/// Gasto real ERP itemizado y clasificado, indexado por year-mes. budget-control:actuals:{year}:{mm}.
+/// Fuente del "real" del monolito (NO se mete en CargaERP por granularidad distinta).
+model Actuals {
+  id         String   @id @default(uuid())
+  year       Int
+  month      Int // 1..12
+  filename   String
+  /// Array de {unCode,unDesc,mes,año,uf,exento,afecto,concepto,conceptoDesc,clasificacion,total}. Todo UF.
+  rows       Json
+  loadedAt   DateTime @default(now()) @db.Timestamptz(6)
+  loadedById String?
+  loadedBy   User?    @relation(fields: [loadedById], references: [id], onDelete: SetNull)
+
+  @@unique([year, month])
+  @@index([year, month])
+}
+
+/// Mayor / Balance / UF con dimensión de período (corrige el bug de las claves GLOBALES 'latest').
+/// budget-control:mayor:latest, balance:latest, uf-table.
+model ErpSource {
+  id         String   @id @default(uuid())
+  tipo       String // "mayor" | "balance" | "uf"
+  year       Int
+  month      Int // 1..12 (para 'uf' el payload puede cubrir el año entero)
+  /// mayor: {rows,ingresos:{byUN...},months,totalCLP,totalUF,warnings}.
+  /// balance: {accounts,totals,utilRow,sumasIguales,colsFound,...}.
+  /// uf: {[month]:{[day]:valorUF(CLP)}}.
+  payload    Json
+  filename   String?
+  loadedAt   DateTime @default(now()) @db.Timestamptz(6)
+  loadedById String?
+  loadedBy   User?    @relation(fields: [loadedById], references: [id], onDelete: SetNull)
+
+  @@unique([tipo, year, month])
+  @@index([tipo, year, month])
+}
+
+// ── Proyección viva ──────────────────────────────────────────────────────────
+
+/// Overrides manuales de proyección por año. budget-control:overrides:{year}.
+model Overrides {
+  id          String   @id @default(uuid())
+  year        Int      @unique
+  /// {[projId]:{[cat]:{[m]:UF}}, ingresos:{[projId]:{[m]:UF}}, oc:{[concepto||catId]:{[m]:UF}}, otrosIngresos:{[m]:UF}, anticipos:{[projId]:{[m]:UF}}}.
+  payload     Json
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/// Proyección a término por proyecto-año. budget-control:proj-completion:{year}.
+model ProjCompletion {
+  id               String    @id @default(uuid())
+  year             Int
+  projectId        String
+  cats             Json // {[catId]: UF (costo proyectado a término)}
+  realStart        DateTime? @db.Date
+  projEnd          DateTime? @db.Date
+  extraWorks       Float? // UF
+  /// {totalContratoVentas: UF}
+  overrideContract Json?
+  replacementName  String?
+  /// {ingresos:number,costos:number,fijadaIngresos:bool,fijadaCostos:bool}
+  curvaShift       Json?
+  updatedAt        DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([year, projectId])
+  @@index([year])
+}
+
+/// Espejo DERIVADO de la proyección (fuente de verdad = false; regenerable). budget-control:proj-snapshot:{year}.
+model ProjSnapshot {
+  id            String   @id @default(uuid())
+  year          Int      @unique
+  controlMonth  Int
+  /// {ingresos:{[projId]:{[m]:UF}}, costos:{[projId]:{[cat]:{[m]:UF}}}, oc:{[cat]:{[m]:UF}}, otrosIngresos:{[m]:UF}, anticipos:{[projId]:{[m]:UF}}}
+  payload       Json
+  isDerived     Boolean  @default(true)
+  schemaVersion Int      @default(2)
+  ts            DateTime @default(now()) @db.Timestamptz(6)
+}
+
+// ── Caja ─────────────────────────────────────────────────────────────────────
+
+/// Caja proyectada mensual por año. Única fuente canónica de la caja del Dashboard. budget-control:cashflow:{year}.
+model CashFlow {
+  id                  String    @id @default(uuid())
+  year                Int       @unique
+  cajaInicialEnero    Float     @default(0)
+  saldoIVADicAnterior Float     @default(0)
+  pctIVACostos        Float     @default(0.77)
+  pctIVAOC            Float     @default(0.05)
+  impuestoRenta       Float     @default(0)
+  cxp                 Json // {1..12: UF} (entradas manuales)
+  cxc                 Json // {1..12: UF}
+  aportes             Json // {1..12: UF}
+  devoluciones        Json // {1..12: UF}
+  // ── Derivados que el módulo reescribe (arrastre entre años) ──
+  cajaFinalDic        Float? // UF
+  cajaMensual         Json? // {1..12: UF cajaFinal por mes}
+  saldoIVADicFinal    Float? // se arrastra a saldoIVADicAnterior del año siguiente
+  cajaMensualTs       DateTime? @db.Timestamptz(6)
+  schemaVersion       Int       @default(2)
+  updatedAt           DateTime  @updatedAt
+  updatedById         String?
+  updatedBy           User?     @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+// ── Gestión de obra ──────────────────────────────────────────────────────────
+
+/// Indicadores de gestión de obra (5 áreas) por proyecto-mes-año. budget-control:control-obras:{year}.
+/// Normaliza el blob anual (hoy last-write-wins sobre todo el año) a filas por (proyecto,mes,área).
+model ControlObras {
+  id          String   @id @default(uuid())
+  year        Int
+  projectId   String
+  month       Int // 1..12
+  /// "plazo" | "calidad" | "seguridad" | "gestion" | "auditoria"
+  areaId      String
+  /// {[fieldKey]: string | bool} — valor crudo del input (numéricos se parsean al puntuar).
+  fields      Json
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([year, projectId, month, areaId])
+  @@index([year, projectId])
+}
+
+/// Curva S de avance físico (programada/controlada) por proyecto-año. budget-control:plazo-curvas:{year}.
+model PlazoCurvas {
+  id         String   @id @default(uuid())
+  year       Int
+  projectId  String
+  meses      String[] // ['YYYY-MM', ...]
+  programada Json // number[] alineado por índice a `meses` (puede traer '' / null)
+  controlada Json // number[] alineado por índice a `meses`
+  updatedAt  DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([year, projectId])
+  @@index([year])
+}
+
+// ── Cierre / snapshots ───────────────────────────────────────────────────────
+
+/// Los 4 snapshots vivos (derivados, fuente de verdad = false). Se conservan para que el cierre
+/// los pueda congelar sin depender de que el navegador haya renderizado la pestaña.
+/// budget-control:{check|scenarios|dashboard|scorecard}-snapshot:{year}.
+model ModuleSnapshotLive {
+  id            String   @id @default(uuid())
+  modulo        String // "check" | "scenarios" | "dashboard" | "scorecard"
+  year          Int
+  payload       Json
+  isDerived     Boolean  @default(true)
+  schemaVersion Int      @default(2)
+  ts            DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([modulo, year])
+}
+
+/// Snapshot global INMUTABLE de cierre de mes (congela los 7 módulos). budget-control:cierre:{year}:{mm}.
+/// lista-cierres y ultimo-cierre se DERIVAN con SELECT mes ORDER BY mes. No UPDATE tras crearse (regla de app).
+model Cierre {
+  id            String   @id @default(uuid())
+  year          Int
+  mes           Int // 1..12
+  mesLabel      String
+  fechaCierre   DateTime @default(now()) @db.Timestamptz(6)
+  /// {projection,cashflow,check,scenarios,dashboard,scorecard,report} — copias congeladas.
+  modulos       Json
+  schemaVersion Int      @default(2) // HOY el monolito NO lo guarda; acá sí
+  cerradoPorId  String? // HOY el monolito NO guarda autor; acá sí
+  cerradoPor    User?    @relation(fields: [cerradoPorId], references: [id], onDelete: SetNull)
+
+  @@unique([year, mes])
+  @@index([year])
+}
+
+/// Informes guardados para comparación entre meses. budget-control:saved-reports:{year}.
+/// Resuelve el array compartido por 3 módulos con un discriminador `tipo` explícito.
+model SavedReport {
+  id           String   @id @default(uuid())
+  year         Int
+  tipo         String // "report" | "projResumen" | "cashflow" (discriminador explícito)
+  label        String
+  cutoffDate   String?
+  controlMonth Int?
+  /// El sub-objeto report | projResumen | cashflow según `tipo`.
+  payload      Json
+  savedAt      DateTime @default(now()) @db.Timestamptz(6)
+  savedById    String?
+  savedBy      User?    @relation(fields: [savedById], references: [id], onDelete: SetNull)
+
+  @@index([year, tipo])
+}
+
+// ── Config / auditoría ───────────────────────────────────────────────────────
+
+/// Config global key/value. budget-control:config, budget-control:cc-url, budget-control:schema-version.
+/// Filas: 'controlPeriod' {controlYear,controlMonth}, 'cc-url' (string; migrar de IP HTTP a HTTPS), 'schema-version' (number).
+model AppConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+/// Bitácora de quién escribió qué (el monolito hoy no atribuye autor a casi nada). Sin equivalente localStorage.
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  entity    String
+  entityKey String
+  action    String
+  at        DateTime @default(now()) @db.Timestamptz(6)
+  diff      Json?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, at])
+}
