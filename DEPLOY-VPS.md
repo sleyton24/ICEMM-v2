@@ -137,3 +137,28 @@ erpSource,projection,cashflow,obras,moduleSnapshot,cierres,savedReports,config,s
 
 ### Después del Bloque B (lo hago yo):
 Fase 2 (cablear dataStore → datos compartidos) · Fase 3 (migrar datos por `/api/sync/import`) · activar flag `api` + verificar cuadre.
+
+---
+
+## ✅ DEPLOY DEFINITIVO — Stack independiente (NO toca ICEMM) ← USAR ESTE (reemplaza el Bloque B de arriba)
+Decisión: **no se toca ICEMM**. El monolito va con su propio stack al lado.
+
+| | ICEMM (intacto) | Monolito (nuevo) |
+|--|--|--|
+| Proceso PM2 | `icemm-api` :3001 | **`gestion-api` :3002** |
+| Código | `/var/www/icemm` | **`/var/www/gestion-api`** (carpeta `gestion-api/` del repo) |
+| Base Postgres | `icemm` | **`gestion`** (nueva, mismo server) |
+| Nginx | sites actuales | site nuevo `gestion.187.127.29.98.nip.io` |
+
+> "Datos compartidos" = **todos los usuarios del monolito ven la misma base `gestion`** (multi-usuario real).
+> NO es la base de ICEMM (por eso no la tocamos). Si más adelante el monolito necesita LEER datos de ICEMM,
+> se agrega lectura cross-DB sin escribir en lo de ICEMM.
+
+Pasos en el VPS (detalle en `gestion-api/README.md`):
+1. **Base aislada:** `sudo -u postgres psql -c "CREATE USER gestion WITH PASSWORD '<clave>';"` + `... "CREATE DATABASE gestion OWNER gestion;"`
+2. **Backend propio:** copiar `gestion-api/` → `/var/www/gestion-api` · `npm ci` · `cp .env.example .env` (completar `DATABASE_URL` de `gestion`, `JWT_SECRET` aleatorio ≥32, `CORS_ORIGIN`) · `npx prisma migrate deploy` (o `prisma db push`) · `npm run build` · `npm run seed:user -- --email=... --password='...' --rol=admin` · `pm2 start ecosystem.config.cjs && pm2 save` · `curl localhost:3002/health`.
+3. **App + Nginx:** Bloque A de arriba (sube `fase1_proyectos.html` + `deploy/nginx-gestion.conf` + htpasswd + certbot). El config ya proxya `/api` → **:3002**.
+4. **ICEMM:** cero cambios. Si `gestion-api` falla, ICEMM ni se entera.
+
+### Después (lo hago yo)
+Fase 2: cablear el `dataStore` del monolito a `/api` (datos compartidos en `gestion`). Fase 3: migrar tus datos (`/api/sync/import`). Activar flag `api` + verificar cuadre.
