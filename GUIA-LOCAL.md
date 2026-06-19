@@ -7,15 +7,26 @@ en local** para revisar cambios **antes de subir a GitHub**.
 
 ## 1. ¿Cuál es la app oficial?
 
-> ✅ **La app oficial es UN solo archivo: `fase1_proyectos.html`** (la raíz del repo).
-> Es el monolito productivo (React + Tailwind vía CDN, datos en el `localStorage` del navegador, montos en UF).
-> Todo lo que ves/usás (Proyectos, Presupuesto, Carga de Datos, Proyecciones, Informe, Flujo de Caja,
-> Check Contable, Escenarios, Dashboard, Scorecard, Control de Obras, Control de Costos) vive ahí.
+> ✅ **La app oficial es la versión integrada del repo `ICEMM-v2`** (la que va al VPS, multi-usuario,
+> con los datos en **PostgreSQL**). NO es el monolito suelto sobre localStorage. Tiene **dos piezas**:
+> - **Frontend:** `fase1_proyectos.html` (la interfaz: Proyectos, Presupuesto, Informe, Flujo de Caja, etc.).
+> - **Backend:** `gestion-api/` (Node/Express/Prisma) → guarda todo en la base `icemm`, schema `gestion`.
 
-**Lo que NO es la app** (no editar / no confundir):
-- `fase1_proyectos.backup-*.html` → **copias viejas** (respaldos con fecha). Disponibles por si acaso, no se usan.
-- `fase1_proyectos.jsx`, `files.zip` → restos antiguos del armado inicial. No se usan.
-- `gestion-api/` → **el backend** (para la versión desplegada con datos compartidos). No es la app que abrís.
+**El frontend oficial es el MISMO archivo `fase1_proyectos.html`** — no hay un HTML aparte. Lo que cambia es el
+**modo**, según el flag `window.ICEMM_BACKEND`:
+- **`api`** → la app OFICIAL: lee/escribe contra el backend (`gestion-api` → PostgreSQL). Datos compartidos, multi-usuario.
+- **`local`** → el "monolito" suelto: guarda en el `localStorage` del navegador, sin backend. Es el modo de
+  **desarrollo / revisión local** (y fallback).
+
+> ⚠️ **Estado real de la conexión a SQL: PREPARADA, todavía NO terminada.** Ya está el backend (`gestion-api`)
+> y el andamiaje en el frontend (`KEY_REGISTRY` + `dataStore`), pero el **cableado final** —que el frontend
+> realmente use el `/api`— es la **Fase 2 pendiente** (ver `CABLEADO-PLAN.md`). Por eso **hoy el flag arranca en
+> `local`** y la app (incluso la del repo) corre con `localStorage`. Cuando terminemos el cableado + el deploy del
+> backend, pasa a modo `api` (SQL) y ahí sí es la app oficial conectada.
+
+**Lo que NO es la app oficial:**
+- `fase1_proyectos.backup-*.html` → copias viejas (respaldos con fecha).
+- `fase1_proyectos.jsx`, `files.zip` → restos antiguos del armado inicial.
 - `ICEMM/` → **otra app distinta** (la app full de ICEMM, gitignoreada). No es esta.
 
 ---
