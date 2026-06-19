@@ -9,7 +9,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Fijado a Babel 7.x: la rama 8 usa el "automatic JSX runtime" por defecto, que
+       inyecta `import {jsx} from "react/jsx-runtime"` y rompe el <script> clásico
+       ("Cannot use import statement outside a module" -> pagina en blanco).
+       7.x usa el runtime "classic" (React.createElement, React global del UMD). -->
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
@@ -217,6 +221,7 @@ const storage = {
     try { if (window.storage && window.storage.setItem) { window.storage.setItem(key, raw); ok = true; } } catch (e) { lastErr = e; }
     try { localStorage.setItem(key, raw); ok = true; } catch (e) { lastErr = e; }
     if (!ok && lastErr) notifyStorageError(lastErr); // sólo avisar si TODO falló
+    try { _writeBehindIfApi(key, value, ok); } catch {} // modo api: espejar al backend (no-op en local)
     return ok;
   },
 };
@@ -779,10 +784,30 @@ const dataStore = (() => {
       return e.params.indexOf('year') >= 0 ? buildKey(id, { year }) : KEY_PREFIX + e.pattern;
     });
   }
-  async function hydrate(/* year */) {
-    // ESQUELETO: en modo API recorrería keysToHydrate(year) con ApiBackend.get y
-    // poblaría el snapshotCache. Deliberadamente vacío mientras el flag sea 'local'.
-    return; // no-op
+  async function hydrate(year) {
+    // En modo 'local' es no-op (cero cambio de comportamiento). En modo 'api' precarga
+    // del backend TODAS las claves directas del año/contexto activo y las VUELCA al
+    // localStorage, de modo que el storage.get SÍNCRONO de siempre lea datos del backend
+    // (los 151 call sites no cambian de firma).
+    if (getMode() !== 'api') return; // no-op en local
+    const keys = keysToHydrate(year);
+    for (const fullKey of keys) {
+      try {
+        const r = resolveKey(fullKey);
+        if (!r) continue;
+        // SALTAR claves derivadas (cierres-list / erp-source 'latest'): requieren mapeo
+        // de forma especial (extraer lista de meses / sub-objeto del período). TODO: hidratar
+        // estas con su transformación propia en una versión posterior.
+        if (r.entry.derive) continue;
+        const v = await ApiBackend.get(fullKey);
+        if (v != null) {
+          localStorage.setItem(fullKey, JSON.stringify(v));
+        }
+      } catch (e) {
+        // Un fallo de UNA clave no debe abortar la hidratación del resto.
+        try { console.error('[ICEMM] hydrate falló para', fullKey, e); } catch {}
+      }
+    }
   }
 
   // ── Fachada pública del dataStore ───────────────────────────────────────────
@@ -804,6 +829,103 @@ const dataStore = (() => {
 })();
 // Exponer en window para inspección/activación futura (NO se consume en runtime hoy).
 if (typeof window !== 'undefined') { window.ICEMM_dataStore = dataStore; }
+
+// ─── CABLEADO BACKEND (sólo activo con window.ICEMM_BACKEND === 'api') ───────────
+// TODO lo de abajo es inerte en modo 'local': cada rama chequea el flag api y retorna
+// de inmediato. En 'local' el comportamiento queda byte-idéntico al de hoy.
+
+// Restaurar el JWT de la sesión al cargar el módulo (una sola vez). En 'local': no toca nada.
+if (typeof window !== 'undefined' && window.ICEMM_BACKEND === 'api') {
+  try {
+    const _t = sessionStorage.getItem('gestion-jwt');
+    if (_t) window.ICEMM_TOKEN = _t;
+  } catch {}
+}
+
+// ── WRITE-BEHIND ──────────────────────────────────────────────────────────────
+// storage.set llama a esto DESPUÉS de calcular ok. En modo api espeja la escritura al
+// backend encolándola en la outbox y programando un drain debounced. En local: no-op.
+let _drainTimer = null;
+function _scheduleDrain() {
+  if (typeof window === 'undefined' || window.ICEMM_BACKEND !== 'api') return;
+  if (_drainTimer) clearTimeout(_drainTimer);
+  _drainTimer = setTimeout(() => {
+    _drainTimer = null;
+    try { dataStore.outbox.drain(); } catch (e) { try { console.error('[ICEMM] drain falló', e); } catch {} }
+  }, 800); // coalesce de ráfagas de autosave; si drain falla, los ops quedan en la outbox
+}
+function _writeBehindIfApi(key, value, ok) {
+  if (!ok) return;                                            // no se guardó local → nada que espejar
+  if (typeof window === 'undefined' || window.ICEMM_BACKEND !== 'api') return; // modo local: NO hace nada
+  // Sólo claves DIRECTAS del registro se escriben por PUT. Las que no están en el
+  // registro (outbox '__outbox', '.corrupt', 'backup:*') → resolveKey null → no se encolan
+  // (evita recursión). Las derivadas (cierres-list / erp-source) no admiten PUT directo.
+  const r = resolveKey(key);
+  if (!r) return;
+  if (r.entry.derive) return;
+  try {
+    dataStore.outbox.enqueue(key, value);
+    _scheduleDrain();
+  } catch (e) { try { console.error('[ICEMM] enqueue falló', key, e); } catch {} }
+}
+
+// ── AUTH contra el backend (modo api) ─────────────────────────────────────────
+async function apiLogin(email, password) {
+  const base = (typeof window !== 'undefined' && window.ICEMM_API_BASE) || '';
+  let res;
+  try {
+    res = await fetch(base + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (e) {
+    throw new Error('No se pudo contactar el servidor');
+  }
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) {
+    throw new Error((body && (body.message || body.error)) || 'Credenciales inválidas');
+  }
+  const token = body && body.token;
+  if (token) {
+    window.ICEMM_TOKEN = token;
+    try { sessionStorage.setItem('gestion-jwt', token); } catch {}
+  }
+  return body && body.user;
+}
+async function apiMe() {
+  const base = (typeof window !== 'undefined' && window.ICEMM_API_BASE) || '';
+  try {
+    const tok = typeof window !== 'undefined' && window.ICEMM_TOKEN;
+    const res = await fetch(base + '/api/auth/me', {
+      method: 'GET',
+      headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
+      credentials: 'include',
+    });
+    if (!res.ok) return null;
+    return await res.json(); // { beta, user }
+  } catch { return null; }
+}
+function clearApiToken() {
+  if (typeof window !== 'undefined') window.ICEMM_TOKEN = null;
+  try { sessionStorage.removeItem('gestion-jwt'); } catch {}
+}
+// El backend devuelve { id, email, nombre, rol }. Lo mapeamos a la forma del monolito.
+// En v1 el RBAC real lo aplica el backend en las escrituras; el front habilita todos
+// los módulos al usuario logueado.
+function mapApiUserToLocal(apiUser) {
+  if (!apiUser) return null;
+  return {
+    id: apiUser.id,
+    username: apiUser.email,
+    name: apiUser.nombre,
+    role: apiUser.rol === 'admin' ? 'admin' : apiUser.rol,
+    modules: [...ALL_MODULE_IDS],
+    active: true,
+  };
+}
 
 // ─── UTILIDADES ───────────────────────────────────────────────────────────────
 
@@ -11261,16 +11383,29 @@ function obrasAnyData(monthObj) {
 
 // ─── LOGIN ────────────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
+  // En modo api el login va contra el backend (campo Usuario = EMAIL); el primer-uso
+  // (definir contraseña del admin semilla) NO aplica.
+  const apiMode = window.ICEMM_BACKEND === 'api';
   // Primer uso: si solo existe el admin semilla SIN contraseña, hay que crearla
   // (no se embebe ninguna clave en el código fuente).
   const seedAdmin = (() => { const us = loadUsers(); return (us.length === 1 && !us[0].passHash) ? us[0] : null; })();
-  const setupMode = !!seedAdmin;
+  const setupMode = !apiMode && !!seedAdmin;
   const [username, setUsername] = useState(seedAdmin ? seedAdmin.username : '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
+    if (apiMode) {
+      try {
+        const apiUser = await apiLogin(username.trim(), password);
+        setError('');
+        onLogin(mapApiUserToLocal(apiUser));
+      } catch (err) {
+        setError((err && err.message) || 'Credenciales inválidas');
+      }
+      return;
+    }
     const users = loadUsers();
     const u = users.find(x => x.username.toLowerCase() === username.trim().toLowerCase());
     if (!u) { setError('Usuario no encontrado'); return; }
@@ -11300,10 +11435,11 @@ function LoginScreen({ onLogin }) {
           {setupMode && <p className="text-[11px] text-amber-600 text-center mt-1">Primer ingreso: definí la contraseña del administrador.</p>}
         </div>
         <label className="flex flex-col gap-1">
-          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Usuario</span>
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{apiMode ? 'Email' : 'Usuario'}</span>
           <input autoFocus value={username} onChange={e => setUsername(e.target.value)}
+            type={apiMode ? 'email' : 'text'}
             className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D01030]"
-            placeholder="usuario" />
+            placeholder={apiMode ? 'email@empresa.cl' : 'usuario'} />
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Contraseña</span>
@@ -12292,9 +12428,26 @@ function App() {
   const [projects,   setProjects]   = useState([]);
   const [user,       setUser]       = useState(null);
   const [authReady,  setAuthReady]  = useState(false);
+  const [apiHydrating, setApiHydrating] = useState(false);
 
   // Restaurar sesión guardada al cargar
   useEffect(() => {
+    // Modo api: validar el JWT restaurado contra /api/auth/me (no hay sesión local).
+    if (window.ICEMM_BACKEND === 'api') {
+      if (window.ICEMM_TOKEN) {
+        apiMe().then(me => {
+          if (me && me.user) {
+            const u = mapApiUserToLocal(me.user);
+            setUser(u);
+            setView(defaultViewFor(u));
+          }
+        }).finally(() => setAuthReady(true));
+      } else {
+        setAuthReady(true); // sin token → LoginScreen
+      }
+      return;
+    }
+    // Modo local: flujo de siempre (IGUAL que hoy).
     try {
       const sess = storage.get('budget-control:session');
       if (sess?.userId) {
@@ -12307,10 +12460,22 @@ function App() {
 
   const handleLogin = (u) => {
     setUser(u);
-    storage.set('budget-control:session', { userId: u.id });
     setView(defaultViewFor(u));
+    if (window.ICEMM_BACKEND === 'api') {
+      // Hidratar el localStorage desde el backend antes de mostrar el contenido.
+      setApiHydrating(true);
+      try {
+        const cfg = storage.get('budget-control:config');
+        dataStore.setContext({ year: activeYear, month: cfg?.controlMonth || (new Date().getMonth() + 1) });
+      } catch {}
+      dataStore.hydrate(activeYear).finally(() => setApiHydrating(false));
+      return;
+    }
+    // Modo local: persistir la sesión como siempre.
+    storage.set('budget-control:session', { userId: u.id });
   };
   const handleLogout = () => {
+    if (window.ICEMM_BACKEND === 'api') clearApiToken();
     storage.set('budget-control:session', null);
     setUser(null);
   };
@@ -12328,6 +12493,18 @@ function App() {
   useEffect(() => {
     if (user && view !== 'users' && !canView(view)) setView(defaultViewFor(user));
   }, [user, view]);
+
+  // Modo api: re-hidratar el localStorage desde el backend al cambiar de año (con sesión
+  // activa). En modo local NO hace nada (el flag corta de inmediato).
+  useEffect(() => {
+    if (window.ICEMM_BACKEND !== 'api' || !user) return;
+    setApiHydrating(true);
+    try {
+      const cfg = storage.get('budget-control:config');
+      dataStore.setContext({ year: activeYear, month: cfg?.controlMonth || (new Date().getMonth() + 1) });
+    } catch {}
+    dataStore.hydrate(activeYear).finally(() => setApiHydrating(false));
+  }, [activeYear, user]);
 
   // Si la lectura inicial de projects falló por CORRUPCIÓN (no por ausencia),
   // cargamos los sample SÓLO en memoria para no dejar la app en blanco, pero
@@ -12398,6 +12575,15 @@ function App() {
   }
   if (!user) {
     return <LoginScreen onLogin={handleLogin} />;
+  }
+  // Modo api: mientras se hidrata el localStorage desde el backend, mostrar un loading
+  // simple en vez del contenido. En modo local apiHydrating es siempre false → sin cambio.
+  if (apiHydrating) {
+    return (
+      <div className="flex h-screen items-center justify-center" style={{background:'#101014'}}>
+        <div className="text-gray-300 text-sm">Cargando datos…</div>
+      </div>
+    );
   }
 
   return (
